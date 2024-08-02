@@ -1,0 +1,16 @@
+{
+  "object": {
+    "pins": [
+      {
+        "package": "llama",
+        "repositoryURL": "https://github.com/ggerganov/llama.cpp",
+        "state": {
+          "branch": "master",
+          "revision": "b72c20b85c1029d135022d39e9a20d4807c11893",
+          "version": null
+        }
+      }
+    ]
+  },
+  "version": 1
+}
