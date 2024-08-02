@@ -70,13 +70,12 @@ let lightpack = Lightpack(apiKey: "your_api_key")
 
 Replace `"your_api_key"` with the actual API key you copied from the Lightpack website.
 
-**Important**: Keep your API key secure and never share it publicly or commit it to version control systems.
+**Important**: Keep your API key secure and never share it publicly or commit it to version control systems. Usage of API keys is subject to our [Privacy Policy](https://lightpack.run/legal/privacy), which includes information on how we collect and process API usage data.
+
 
 ### Using Lightpack
 
 Here's a simple example to get you started with Lightpack:
-
-[The rest of the Getting Started section remains unchanged]
 
 ```swift
 import Lightpack
@@ -568,14 +567,20 @@ Before submitting a new bug report, please search the existing issues to see if 
 
 We appreciate your help in improving Lightpack!
 
+## Privacy and Data Collection
+
+Lightpack is designed with privacy in mind, operating primarily on-device. However, we do collect certain analytics and usage data to improve our services. For full details on what data we collect and how we use it, please refer to our [Privacy Policy](https://lightpack.run/legal/privacy).
+
+## Terms of Service and Privacy
+
+By using Lightpack, you agree to our [Terms of Service](https://lightpack.run/legal/terms). We encourage you to read these terms and our [Privacy Policy](https://lightpack.run/legal/privacy) to understand your rights and responsibilities when using our service.
+
 ## Model Licenses
 
 Please see the model licenses in [Available Model Families](#available-model-families) or [Lightpack Models](https://lightpack.run/models). Different models may have different licensing terms, so it's important to review the specific license for each model you intend to use.
 
 ## Support
 
-If you need assistance or have any questions about Lightpack, please don't hesitate to reach out. You can contact the founders directly at [founders@lightpack.run](mailto:founders@lightpack.run).
+If you need assistance or have any questions about Lightpack, including inquiries about our privacy practices or terms of service, please don't hesitate to reach out. You can contact the founders directly at [founders@lightpack.run](mailto:founders@lightpack.run).
 
-We strive to respond to all inquiries as quickly as possible and appreciate your feedback and questions.
-
-We hope you find Lightpack useful for your AI-powered Swift applications! If you have any questions or run into any issues, please don't hesitate to reach out.
+We strive to respond to all inquiries as quickly as possible and appreciate your feedback and questions. For more information on how we handle your data, please see our [Privacy Policy](https://lightpack.run/legal/privacy).
