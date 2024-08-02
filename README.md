@@ -20,9 +20,12 @@ Run **Llama 3.1** and **Gemma 2** in your app for free. Lightpack lets you chat 
 To add Lightpack to your Xcode project:
 
 1. In Xcode, select "File" → "Add Packages..."
-2. In the search bar, enter the URL of the Lightpack repository: `https://github.com/lightpack-run/lightpack.git`
-3. Choose the version rule you want to follow (e.g., "Up to Next Major" version)
-4. Click "Add Package"
+2. In the search bar, enter the URL of the Lightpack repository
+```swift
+https://github.com/lightpack-run/lightpack.git
+```
+4. Choose the version rule you want to follow (e.g., "Up to Next Major" version)
+5. Click "Add Package"
 
 After installation, you can import Lightpack in your Swift files:
 
