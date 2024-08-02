@@ -24,8 +24,14 @@ To add Lightpack to your Xcode project:
 ```swift
 https://github.com/lightpack-run/lightpack.git
 ```
-4. Choose the version rule you want to follow (e.g., "Up to Next Major" version)
-5. Click "Add Package"
+3. Set the Dependency Rule to "Branch" and select "main"
+4. In the "Add to Target" section, select your app target (e.g., HelloLightpack2)
+5. Choose the version rule you want to follow (e.g., "Up to Next Major" version)
+6. Click "Add Package"
+
+Your package setup should look similar to this:
+
+![Lightpack Package Setup](https://lightpack.run/spm.png)
 
 After installation, you can import Lightpack in your Swift files:
 
