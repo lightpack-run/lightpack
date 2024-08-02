@@ -8,7 +8,7 @@ import UIKit
 import AppKit
 #endif
 
-public let lightpackVersion = "0.0.1"
+public let lightpackVersion = "0.0.2"
 
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
 public class Lightpack: LightpackProtocol, ObservableObject {
@@ -63,12 +63,22 @@ public class Lightpack: LightpackProtocol, ObservableObject {
                 return
             }
             
-            self.models = modelMetadata.models
-            self.families = modelMetadata.familyModels
+            DispatchQueue.main.async {
+                self.models = modelMetadata.models
+                self.families = modelMetadata.familyModels
+            }
             
             // Update model statuses based on downloaded files
             let fileManager = FileManager.default
             let applicationSupportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            
+            if !fileManager.fileExists(atPath: applicationSupportDirectory.path) {
+                do {
+                    try fileManager.createDirectory(at: applicationSupportDirectory, withIntermediateDirectories: true, attributes: nil)
+                } catch {
+                    log("Error creating Application Support directory: \(error.localizedDescription)", true)
+                }
+            }
             
             do {
                 let fileURLs = try fileManager.contentsOfDirectory(at: applicationSupportDirectory, includingPropertiesForKeys: nil)
@@ -142,8 +152,10 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         }
         
         // Update the current models and families
-        self.models = mergedModels
-        self.families = mergedFamilies
+        DispatchQueue.main.async {
+            self.models = mergedModels
+            self.families = mergedFamilies
+        }
     }
     
     private func checkNetworkConnectivity() throws {
@@ -212,7 +224,9 @@ public class Lightpack: LightpackProtocol, ObservableObject {
             let context = try LlamaContext.create_context(path: modelUrl.path)
             chatManager.setContext(context)
             
-            loadedModel = model
+            DispatchQueue.main.async {
+                self.loadedModel = model
+            }
             
             let loadTime = Double(DispatchTime.now().uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000_000.0
             let backend = await context.getBackendInfo()
@@ -445,7 +459,9 @@ public class Lightpack: LightpackProtocol, ObservableObject {
             model.status = newStatus
             models[modelId] = model
             saveModelMetadata()
-            objectWillChange.send()
+            DispatchQueue.main.async {
+                self.objectWillChange.send()
+            }
         }
     }
 
@@ -469,10 +485,12 @@ public class Lightpack: LightpackProtocol, ObservableObject {
     }
     
     private func updateTotalModelSize() {
-        totalModelSize = models.values
-            .filter { $0.status == .downloaded }
-            .map { Float($0.size) }
-            .reduce(0.0 as Float, +)
+        DispatchQueue.main.async {
+            self.totalModelSize = self.models.values
+                .filter { $0.status == .downloaded }
+                .map { Float($0.size) }
+                .reduce(0.0 as Float, +)
+        }
     }
     
     private func isModelOutdated(_ localModel: LPModel, _ remoteModel: LPModel) -> Bool {
@@ -520,7 +538,7 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         sendApiEvent(.clearChat)
     }
     
-    public func chatModel(_ modelId: String?, messages: [LPChatMessage], onToken: @escaping (String) -> Void) async throws {
+    public func chatModel(_ modelId: String? = nil, messages: [LPChatMessage], onToken: @escaping (String) -> Void) async throws {
         do {
             let validModelId = cleanModelId(modelId)
             log("Chat model \(validModelId)")
@@ -558,8 +576,8 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         pageSize: Int? = nil,
         parameterIds: [String]? = nil,
         quantizationIds: [String]? = nil,
-        sizeMax: Int? = nil,
-        sizeMin: Int? = nil,
+        sizeMax: Float? = nil,
+        sizeMin: Float? = nil,
         sort: String? = nil,
         completion: @escaping (Result<(LPModelsResponse, [String]), LPError>) -> Void
     ) {
@@ -659,7 +677,7 @@ public class Lightpack: LightpackProtocol, ObservableObject {
                         case .success(_):
                             continuation.resume()
                         case .failure(let error):
-                            self.log("Failed to send analytics event: \(error)")
+                            self.log("Failed to send event: \(error)")
                             continuation.resume(throwing: error)
                         }
                     }
@@ -1606,7 +1624,6 @@ public class Lightpack: LightpackProtocol, ObservableObject {
             } else {
                 new_token_str = ""
             }
-            log(new_token_str)
             // tokens_list.append(new_token_id)
 
             llama_batch_clear(&batch)

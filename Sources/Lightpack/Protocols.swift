@@ -70,8 +70,8 @@ public protocol LightpackProtocol {
         pageSize: Int?,
         parameterIds: [String]?,
         quantizationIds: [String]?,
-        sizeMax: Int?,
-        sizeMin: Int?,
+        sizeMax: Float?,
+        sizeMin: Float?,
         sort: String?,
         completion: @escaping (Result<(LPModelsResponse, [String]), LPError>) -> Void
     )
