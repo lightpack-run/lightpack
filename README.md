@@ -116,7 +116,7 @@ Here's a basic SwiftUI example that demonstrates how to use Lightpack in a chat 
 import SwiftUI
 import Lightpack
 
-struct ChatView: View {
+struct ContentView: View {
     @StateObject private var lightpack = Lightpack(apiKey: "your_api_key")
     @State private var userInput = ""
     @State private var chatMessages: [LPChatMessage] = []
@@ -186,6 +186,10 @@ struct MessageView: View {
         }
         .padding(.horizontal)
     }
+}
+
+#Preview {
+    ContentView()
 }
 ```
 
@@ -262,16 +266,16 @@ Here are quick code snippets for each of the core functions provided by Lightpac
 
 ```swift
 lightpack.getModels(
-    bitMax: 6,
-    bitMin: 2,
-    familyIds: ["3dbcfe36-17fc-45b8-acb6-b3af2c320431", "50be08ec-d6a1-45c8-8c6f-efa34ee9ba17"],
+    bitMax: 8,
+    bitMin: 0,
+    familyIds: ["3dbcfe36-17fc-45b8-acb6-b3af2c320431"],
     modelIds: nil,
     page: 1,
     pageSize: 10,
-    parameterIds: ["1.1B", "7B"],
-    quantizationIds: ["q4_0", "q5_1"],
+    parameterIds: ["8B"],
+    quantizationIds: ["Q4_K_M"],
     sizeMax: 5,  // 5 GB
-    sizeMin: 0.5,   // 500 MB
+    sizeMin: 1,   // 500 MB
     sort: "size:desc"
 ) { result in
     switch result {
@@ -291,8 +295,8 @@ lightpack.getModels(
 
 ```swift
 lightpack.getModelFamilies(
-    familyIds: ["3dbcfe36-17fc-45b8-acb6-b3af2c320431", "50be08ec-d6a1-45c8-8c6f-efa34ee9ba17"],
-    modelParameterIds: ["1.1B", "7B"],
+    familyIds: ["3dbcfe36-17fc-45b8-acb6-b3af2c320431"],
+    modelParameterIds: ["8B"],
     page: 1,
     pageSize: 5,
     sort: "title:asc"
@@ -317,71 +321,83 @@ _Replace the example `"23a77013-fe73-4f26-9ab2-33d315a71924"` with your actual m
 #### Download a model
 
 ```swift
-do {
-    try await lightpack.downloadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
-    print("Model downloaded successfully")
-} catch {
-    print("Error downloading model: \(error)")
+Task {
+  do {
+      try await lightpack.downloadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
+      print("Model downloaded successfully")
+  } catch {
+      print("Error downloading model: \(error)")
+  }
 }
 ```
 
 #### Pause a model download
 
 ```swift
-do {
-    try await lightpack.pauseDownloadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
-    print("Model download paused")
-} catch {
-    print("Error pausing download: \(error)")
+Task {
+  do {
+      try await lightpack.pauseDownloadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
+      print("Model download paused")
+  } catch {
+      print("Error pausing download: \(error)")
+  }
 }
 ```
 
 #### Resume a model download
 
 ```swift
-do {
-    try await lightpack.resumeDownloadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
-    print("Model download resumed")
-} catch {
-    print("Error resuming download: \(error)")
+Task {
+  do {
+      try await lightpack.resumeDownloadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
+      print("Model download resumed")
+  } catch {
+      print("Error resuming download: \(error)")
+  }
 }
 ```
 
 #### Cancel a model download
 
 ```swift
-do {
-    try await lightpack.cancelDownloadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
-    print("Model download cancelled")
-} catch {
-    print("Error cancelling download: \(error)")
+Task {
+  do {
+      try await lightpack.cancelDownloadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
+      print("Model download cancelled")
+  } catch {
+      print("Error cancelling download: \(error)")
+  }
 }
 ```
 
 #### Remove models
 
 ```swift
-do {
-    // Remove specific models
-    try await lightpack.removeModels(modelIds: ["model_id_1", "model_id_2"], removeAll: false)
-    
-    // Or remove all models
-    // try await lightpack.removeModels(removeAll: true)
-    
-    print("Models removed successfully")
-} catch {
-    print("Error removing models: \(error)")
+Task {
+  do {
+      // Remove specific models
+      try await lightpack.removeModels(modelIds: ["model_id_1", "model_id_2"], removeAll: false)
+      
+      // Or remove all models
+      // try await lightpack.removeModels(removeAll: true)
+      
+      print("Models removed successfully")
+  } catch {
+      print("Error removing models: \(error)")
+  }
 }
 ```
 
 #### Load a model
 
 ```swift
-do {
-    try await lightpack.loadModel("23a77013-fe73-4f26-9ab2-33d315a71924", setActive: true)
-    print("Model loaded and set as active")
-} catch {
-    print("Error loading model: \(error)")
+Task {
+  do {
+      try await lightpack.loadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
+      print("Model loaded and set as active")
+  } catch {
+      print("Error loading model: \(error)")
+  }
 }
 ```
 
@@ -390,27 +406,31 @@ do {
 #### Chat with a model
 
 ```swift
-do {
-    let messages = [
-        LPChatMessage(role: .user, content: "Why is water blue?")
-    ]
-    
-    try await lightpack.chatModel("23a77013-fe73-4f26-9ab2-33d315a71924", messages: messages) { token in
-        print(token)
-    }
-} catch {
-    print("Error in chat: \(error)")
+Task {
+  do {
+      let messages = [
+          LPChatMessage(role: .user, content: "Why is water blue?")
+      ]
+      
+      try await lightpack.chatModel("23a77013-fe73-4f26-9ab2-33d315a71924", messages: messages) { token in
+          print(token)
+      }
+  } catch {
+      print("Error in chat: \(error)")
+  }
 }
 ```
 
 #### Clear chat history
 
 ```swift
-do {
-    try await lightpack.clearChat()
-    print("Chat history cleared")
-} catch {
-    print("Error clearing chat: \(error)")
+Task {
+  do {
+      try await lightpack.clearChat()
+      print("Chat history cleared")
+  } catch {
+      print("Error clearing chat: \(error)")
+  }
 }
 ```
 
