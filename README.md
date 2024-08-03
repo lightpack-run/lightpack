@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/github/stars/lightpack-run/lightpack" alt="GitHub stars"/>
 </p>
 
-Run **Llama 3.1** and **Gemma 2** in your app for free. Lightpack lets you chat with your favorite AI models on-device in 3 lines of code. The Swift package is **open-sourced**, supports **offline**, and preserves **privacy** by keeping conversations local.
+Run **Llama 3.1** and **Gemma 2** in your iOS and macOS apps for free. Lightpack lets you chat with your favorite AI models on-device in 3 lines of code. The Swift package is **open-sourced**, supports **offline**, and preserves **privacy** by keeping conversations local.
 
 ## Installation
 
