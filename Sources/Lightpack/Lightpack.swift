@@ -8,7 +8,7 @@ import UIKit
 import AppKit
 #endif
 
-public let lightpackVersion = "0.0.2"
+public let lightpackVersion = "0.0.3"
 
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
 public class Lightpack: LightpackProtocol, ObservableObject {
@@ -16,6 +16,7 @@ public class Lightpack: LightpackProtocol, ObservableObject {
     @Published public private(set) var families: [String: LPModelFamily] = [:]
     @Published public private(set) var loadedModel: LPModel?
     @Published public private(set) var totalModelSize: Float = 0.0
+    @Published private(set) var isInitialized: Bool = false
     
     private let apiKey: String
     
@@ -46,115 +47,134 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         self.chatManager = ChatManager(enableLogging: enableLogging)
         self.downloadManager = DownloadManager(enableLogging: enableLogging)
        
-       Task { await loadModelMetadata() }
-   }
+        Task {
+            await loadModelMetadata()
+            DispatchQueue.main.async {
+                self.isInitialized = true
+                self.log("Lightpack initialization completed")
+            }
+        }
+    }
+    
+    private func awaitInitialization() async {
+        // 100 milliseconds
+        while !isInitialized { try? await Task.sleep(nanoseconds: 100 * 1_000_000) }
+    }
     
     private func loadModelMetadata() async {
-        log("Load model metadata")
+        guard let modelMetadata = await loadModelMetadataFromUserDefaults() else { return }
+        
+        do {
+            let applicationSupportDirectoryURL = try getApplicationSupportDirectoryURL()
+            await updateModelsAndFamilies(with: modelMetadata, applicationSupportDirectoryURL: applicationSupportDirectoryURL)
+        } catch {
+            log("Error accessing application support directory: \(error)", true)
+        }
+    }
+
+    private func loadModelMetadataFromUserDefaults() async -> LPModelMetadataResponse? {
         guard let data = UserDefaults.standard.data(forKey: userDefaultsModelMetadataKey) else {
             log("No model metadata found in UserDefaults")
-            return
+            return nil
         }
         
         do {
             let modelMetadata = try JSONDecoder().decode(LPModelMetadataResponse.self, from: data)
             guard !modelMetadata.models.isEmpty else {
                 log("Decoded model metadata is empty")
-                return
+                return nil
             }
-            
-            DispatchQueue.main.async {
-                self.models = modelMetadata.models
-                self.families = modelMetadata.familyModels
-            }
-            
-            // Update model statuses based on downloaded files
-            let fileManager = FileManager.default
-            let applicationSupportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            
-            if !fileManager.fileExists(atPath: applicationSupportDirectory.path) {
-                do {
-                    try fileManager.createDirectory(at: applicationSupportDirectory, withIntermediateDirectories: true, attributes: nil)
-                } catch {
-                    log("Error creating Application Support directory: \(error.localizedDescription)", true)
-                }
-            }
-            
-            do {
-                let fileURLs = try fileManager.contentsOfDirectory(at: applicationSupportDirectory, includingPropertiesForKeys: nil)
-                for fileURL in fileURLs {
-                    let modelId = fileURL.lastPathComponent
-                    if var model = self.models[modelId] {
-                        model.status = .downloaded
-                        self.models[modelId] = model
-                    }
-                }
-            } catch {
-                log("Error while enumerating files: \(error.localizedDescription)", true)
-            }
-            
-            updateTotalModelSize()
+            return modelMetadata
         } catch {
             log("Error decoding model data: \(error)", true)
+            return nil
         }
     }
-    
-    private func saveAndMergeModelMetadata(models: [LPModel]?, families: [LPModelFamily]?) {
-        let decoder = JSONDecoder()
-        let encoder = JSONEncoder()
-        
-        // Fetch existing metadata
-        var existingMetadata: LPModelMetadataResponse?
-        if let data = UserDefaults.standard.data(forKey: userDefaultsModelMetadataKey) {
-            existingMetadata = try? decoder.decode(LPModelMetadataResponse.self, from: data)
-        }
-        
-        // Merge models
-        var mergedModels: [String: LPModel] = existingMetadata?.models ?? [:]
-        if let newModels = models {
-            for model in newModels {
-                if let existingModel = mergedModels[model.modelId] {
-                    // Preserve the existing status and downloadProgress
-                    var updatedModel = model
-                    updatedModel.status = existingModel.status
-                    updatedModel.downloadProgress = existingModel.downloadProgress
-                    
-                    // Check if the model is outdated
-                    if isModelOutdated(existingModel, model) {
-                        updatedModel.status = .outdated
-                    }
-                    
-                    mergedModels[model.modelId] = updatedModel
-                } else {
-                    mergedModels[model.modelId] = model
-                }
+
+    private func updateModelsAndFamilies(with metadata: LPModelMetadataResponse, applicationSupportDirectoryURL: URL) async {
+        await MainActor.run {
+            for (modelId, model) in metadata.models {
+                var updatedModel = model
+                let fileURL = applicationSupportDirectoryURL.appendingPathComponent(modelId)
+                updatedModel.status = FileManager.default.fileExists(atPath: fileURL.path) ? .downloaded : .notDownloaded
+                self.models[modelId] = updatedModel
             }
+            self.families = metadata.familyModels
+            self.updateTotalModelSize()
+            self.saveModelMetadata()
         }
+    }
+
+    private func saveAndMergeModelMetadata(models: [LPModel]? = nil, families: [LPModelFamily]? = nil) {
+        let existingMetadata = loadExistingMetadata()
         
-        // Merge families
-        var mergedFamilies: [String: LPModelFamily] = existingMetadata?.familyModels ?? [:]
-        if let newFamilies = families {
-            for family in newFamilies {
-                mergedFamilies[family.familyId] = family
-            }
-        }
+        let mergedModels = mergeModels(newModels: models, existingModels: self.models)
+        let mergedFamilies = mergeFamilies(newFamilies: families, existingFamilies: existingMetadata?.familyModels ?? [:])
         
-        // Create new metadata response
         let newMetadata = LPModelMetadataResponse(
             familyModels: mergedFamilies,
             models: mergedModels,
             updatedAt: ISO8601DateFormatter().string(from: Date())
         )
         
-        // Save to UserDefaults
-        if let encodedData = try? encoder.encode(newMetadata) {
-            UserDefaults.standard.set(encodedData, forKey: userDefaultsModelMetadataKey)
+        saveMetadataToUserDefaults(newMetadata)
+        updateCurrentModelsAndFamilies(models: mergedModels, families: mergedFamilies)
+    }
+
+    private func loadExistingMetadata() -> LPModelMetadataResponse? {
+        guard let data = UserDefaults.standard.data(forKey: userDefaultsModelMetadataKey),
+              let metadata = try? JSONDecoder().decode(LPModelMetadataResponse.self, from: data) else {
+            log("No metadata found in UserDefaults on app start")
+            return nil
         }
+        return metadata
+    }
+
+    private func mergeModels(newModels: [LPModel]?, existingModels: [String: LPModel]) -> [String: LPModel] {
+        var mergedModels = existingModels
+        guard let newModels = newModels else { return mergedModels }
         
-        // Update the current models and families
+        for newModel in newModels {
+            if let existingModel = mergedModels[newModel.modelId] {
+                var updatedModel = newModel
+                updatedModel.status = existingModel.status
+                updatedModel.downloadProgress = existingModel.downloadProgress
+                updatedModel.status = isModelOutdated(existingModel, newModel) ? .outdated : updatedModel.status
+                mergedModels[newModel.modelId] = updatedModel
+            } else {
+                mergedModels[newModel.modelId] = newModel
+            }
+        }
+        return mergedModels
+    }
+
+    private func mergeFamilies(newFamilies: [LPModelFamily]?, existingFamilies: [String: LPModelFamily]) -> [String: LPModelFamily] {
+        var mergedFamilies = existingFamilies
+        guard let newFamilies = newFamilies else { return mergedFamilies }
+        
+        log("Merging new families...")
+        for family in newFamilies {
+            mergedFamilies[family.familyId] = family
+            log("Added or updated family \(family.familyId): \(family)")
+        }
+        return mergedFamilies
+    }
+
+    private func saveMetadataToUserDefaults(_ metadata: LPModelMetadataResponse) {
+        let encoder = JSONEncoder()
+        if let encodedData = try? encoder.encode(metadata) {
+            UserDefaults.standard.set(encodedData, forKey: userDefaultsModelMetadataKey)
+            log("Saved metadata to UserDefaults")
+        } else {
+            log("Failed to encode new metadata")
+        }
+    }
+
+    private func updateCurrentModelsAndFamilies(models: [String: LPModel], families: [String: LPModelFamily]) {
         DispatchQueue.main.async {
-            self.models = mergedModels
-            self.families = mergedFamilies
+            self.models = models
+            self.families = families
+            self.log("Updated models and families published: \(models), \(families)")
         }
     }
     
@@ -165,29 +185,29 @@ public class Lightpack: LightpackProtocol, ObservableObject {
     }
     
     private func getModel(_ modelId: String) async throws -> LPModel {
-        log("Get model \(modelId)")
-        guard modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { throw LPError.modelIsEmpty }
+        log("Getting model \(modelId), current status: \(models[modelId]?.status ?? .notDownloaded)")
+        guard !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw LPError.modelIsEmpty
+        }
 
-        if let model = models[modelId] {
-            // Check if the model file exists
-            let fileManager = FileManager.default
-            let modelFilePath = getFileURL(modelId).path
-            
-            if fileManager.fileExists(atPath: modelFilePath) {
-                if model.status != .downloaded {
-                    updateModelStatus(modelId: modelId, newStatus: .downloaded)
-                }
-                return models[modelId]!  // Return the updated model
-            } else if model.status == .downloaded {
-                // File doesn't exist but status is downloaded, update status
-                updateModelStatus(modelId: modelId, newStatus: .notDownloaded)
+        if var model = models[modelId] {
+            let fileExists = modelFileExists(for: modelId)
+            if fileExists && model.status != .downloaded {
+                model.status = .downloaded
+                models[modelId] = model
+                saveModelMetadata() // Save the updated status
+                log("Updated model status to downloaded based on file existence")
+            } else if !fileExists && model.status == .downloaded {
+                model.status = .notDownloaded
+                models[modelId] = model
+                saveModelMetadata() // Save the updated status
+                log("Updated model status to not downloaded based on file absence")
             }
-            // Return the model even if it's not downloaded
             return model
         }
-        
-        // Model not found locally, try to fetch from API
+
         try checkNetworkConnectivity()
+        
         return try await withCheckedThrowingContinuation { continuation in
             getModels(modelIds: [modelId]) { result in
                 switch result {
@@ -198,93 +218,110 @@ public class Lightpack: LightpackProtocol, ObservableObject {
                         continuation.resume(throwing: LPError.modelNotFound)
                     }
                 case .failure(let error):
-                    continuation.resume(throwing: error)
+                    let errorMessage = "Network request failed: \(error.localizedDescription)"
+                    continuation.resume(throwing: LPError.networkError(error))
                 }
             }
         }
     }
     
     public func loadModel(_ modelId: String) async throws {
-        log("Load model \(modelId)")
+        await awaitInitialization()
+        log("Loading model \(modelId)")
         
-        do {
-            guard modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { throw LPError.modelIsEmpty }
-            let model = try await getModel(modelId)
-            
-            if model.status == .downloaded && modelId == loadedModel?.modelId { return }
-            
-            if model.status == .notDownloaded {
-                try await downloadModel(modelId)
-            } else if case .paused = model.status {
-                try await resumeDownloadModel(modelId)
-            }
-            
-            let startTime = DispatchTime.now()
-            let modelUrl = getFileURL(modelId)
-            let context = try LlamaContext.create_context(path: modelUrl.path)
-            chatManager.setContext(context)
-            
-            DispatchQueue.main.async {
-                self.loadedModel = model
-            }
-            
-            let loadTime = Double(DispatchTime.now().uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000_000.0
-            let backend = await context.getBackendInfo()
-            
-            log("\(model.title) loaded in \(String(format: "%.2f", loadTime))s from \(backend)")
-            
-            sendApiEvent(.loadModel, data: ["modelId": modelId])
-        } catch {
-            log("Error loading model: \(error)", true)
-            throw error // Propagate the error up
+        let model = try await getAndValidateModel(modelId)
+        
+        if model.status == .notDownloaded || model.status == .paused {
+            try await downloadModel(modelId)
+        }
+        
+        if modelId != loadedModel?.modelId {
+            try await loadModelIntoContext(model)
         }
     }
 
     public func downloadModel(_ modelId: String) async throws {
+        await awaitInitialization()
         log("Download model \(modelId)")
-        
-        do {
-            try checkNetworkConnectivity()
-            
-            guard modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
-                throw LPError.modelIsEmpty
-            }
 
-            let model = try await getModel(modelId)
-            
-            if model.status == .downloaded {
-                log("Model \(modelId) is already downloaded.")
-                return
-            }
-            
-            updateModelStatus(modelId: modelId, newStatus: .downloading)
-            updateModelProgress(modelId: modelId, progress: downloadManager.getProgress(for: modelId))
-            
-            let downloadUrl: String
-            if model.downloadUrl == nil {
-                downloadUrl = try await getModelDownloadUrl(modelId: modelId)
-                updateModelDownloadUrl(modelId: modelId, downloadUrl: downloadUrl)
-            } else {
-                downloadUrl = model.downloadUrl!
-            }
-            
-            _ = try await downloadManager.downloadModel(model, downloadUrl: downloadUrl) { [weak self] modelId, progress in
-                self?.updateModelProgress(modelId: modelId, progress: progress)
-            }
-            updateModelStatus(modelId: modelId, newStatus: .downloaded)
-            updateTotalModelSize()
-            
-            var updatedModel = model
-            updatedModel.status = .downloaded
-            saveAndMergeModelMetadata(models: [updatedModel], families: nil)
-            
-            sendApiEvent(.downloadModel, data: ["modelId": modelId])
-        } catch {
-            log("Error downloading model: \(error)", true)
-            updateModelStatus(modelId: modelId, newStatus: .notDownloaded)
-            updateModelProgress(modelId: modelId, progress: 0)
-            throw error
+        let model = try await getAndValidateModel(modelId)
+        
+        guard model.status != .downloaded else {
+            log("Model \(modelId) is already downloaded. Skipping download process.")
+            return
         }
+        
+        guard !downloadManager.isDownloadInProgress(for: modelId) else {
+            log("Download for model \(modelId) is already in progress.")
+            return
+        }
+
+        try await performModelDownload(model)
+    }
+
+    public func pauseDownloadModel(_ modelId: String) async throws {
+        await awaitInitialization()
+        log("Pause download model \(modelId)")
+        
+        let model = try await getAndValidateModel(modelId)
+        let success = try await downloadManager.pauseDownload(model)
+        
+        updateModelAfterPause(modelId, success: success)
+        sendApiEvent(.pauseDownloadModel, data: ["modelId": modelId])
+    }
+
+    @MainActor
+    public func resumeDownloadModel(_ modelId: String) async throws {
+        await awaitInitialization()
+        log("Resume download model \(modelId)")
+        
+        try checkNetworkConnectivity()
+        let model = try await getAndValidateModel(modelId)
+        
+        guard let downloadUrl = model.downloadUrl else {
+            throw LPError.downloadError(.noDownloadUrl)
+        }
+        
+        try await resumeModelDownload(model, downloadUrl: downloadUrl)
+    }
+
+    public func cancelDownloadModel(_ modelId: String) async throws {
+        await awaitInitialization()
+        log("Cancel download model \(modelId)")
+        
+        let model = try await getAndValidateModel(modelId)
+        downloadManager.cancelDownload(model)
+        
+        updateModelStatus(modelId: modelId, newStatus: .notDownloaded)
+        updateModelProgress(modelId: modelId, progress: 0)
+        objectWillChange.send()
+        
+        sendApiEvent(.cancelDownloadModel, data: ["modelId": modelId])
+    }
+
+    public func removeModels(modelIds: [String]? = nil, removeAll: Bool = false) async throws {
+        await awaitInitialization()
+        log("Removing models: \(modelIds ?? []), removeAll: \(removeAll)")
+        
+        try await performModelRemoval(modelIds: modelIds, removeAll: removeAll)
+    }
+
+    public func clearChat() async {
+        await awaitInitialization()
+        chatManager.clearContext()
+        sendApiEvent(.clearChat)
+    }
+
+    public func chatModel(_ modelId: String? = nil, messages: [LPChatMessage], onToken: @escaping (String) -> Void) async throws {
+        await awaitInitialization()
+        
+        let validModelId = cleanModelId(modelId)
+        log("Chat model \(validModelId)")
+        
+        try await loadModel(validModelId)
+        try await chatManager.complete(messages: messages, onToken: onToken)
+        
+        sendApiEvent(.chatModel, data: ["modelId": validModelId])
     }
     
     private func getModelDownloadUrl(modelId: String) async throws -> String {
@@ -307,161 +344,72 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         }
     }
     
-    public func pauseDownloadModel(_ modelId: String) async throws {
-        log("Pause download model \(modelId)")
-        do {
-            guard modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { throw LPError.modelIsEmpty }
-            let model = try await getModel(modelId)
-            let success = try await downloadManager.pauseDownload(model)
-            if success {
-                let progress = downloadManager.getProgress(for: modelId)
-                updateModelStatus(modelId: modelId, newStatus: .paused)
-                updateModelProgress(modelId: modelId, progress: progress)
-            } else {
-                log("Failed to pause download for model: \(modelId)")
-                updateModelStatus(modelId: modelId, newStatus: .notDownloaded)
-            }
-            
-            sendApiEvent(.pauseDownloadModel, data: ["modelId": modelId])
-            
-            return
-        } catch {
-            log("Error pausing download: \(error)", true)
-            throw error
-        }
-    }
-    
-    @MainActor
-    public func resumeDownloadModel(_ modelId: String) async throws {
-        log("Resume download model \(modelId)")
-        try checkNetworkConnectivity()
-        
-        do {
-            guard modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { throw LPError.modelIsEmpty }
-            let model = try await getModel(modelId)
-            updateModelStatus(modelId: modelId, newStatus: .downloading)
-            
-            guard let downloadUrl = model.downloadUrl else {
-                throw LPError.downloadError(.noDownloadUrl)
-            }
-            
-            let success = try await downloadManager.resumeDownload(model, downloadUrl: downloadUrl) { [weak self] modelId, progress in
-                self?.updateModelProgress(modelId: modelId, progress: progress)
-            }
-            if success {
-                updateModelStatus(modelId: modelId, newStatus: .downloading)
-                updateTotalModelSize()
-            } else {
-                log("Failed to resume download for model: \(modelId)")
-                updateModelStatus(modelId: modelId, newStatus: .paused)
-            }
-            
-            sendApiEvent(.resumeDownloadModel, data: ["modelId": modelId])
-            
-            return
-        } catch {
-            log("Error resuming download: \(error)", true)
-            updateModelStatus(modelId: modelId, newStatus: .paused)
-            throw error
-        }
-    }
-    
-    public func cancelDownloadModel(_ modelId: String) async throws {
-        log("Cancel download model \(modelId)")
-        do {
-            let model = try await getModel(modelId)
-            log("Cancel download for model \(modelId)")
-            downloadManager.cancelDownload(model)
-            updateModelStatus(modelId: modelId, newStatus: .notDownloaded)
-            updateModelProgress(modelId: modelId, progress: 0)
-            objectWillChange.send()
-            
-            sendApiEvent(.cancelDownloadModel, data: ["modelId": modelId])
-            
-            return
-        } catch {
-            log("Error cancelling download: \(error)", true)
-            updateModelStatus(modelId: modelId, newStatus: .notDownloaded)
-            throw error
-        }
-    }
-    
-    public func removeModels(modelIds: [String]? = nil, removeAll: Bool = false) async throws {
-        log("Removing models: \(modelIds ?? []), removeAll: \(removeAll)")
-        
-        let fileManager = FileManager.default
-        let applicationSupportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        
-        // Early return if no action is required
-        guard removeAll || (modelIds != nil && !modelIds!.isEmpty) else {
-            log("No models to remove")
-            return
-        }
-        
-        do {
-            let fileURLs = try fileManager.contentsOfDirectory(at: applicationSupportDirectory, includingPropertiesForKeys: nil)
-            var removedModelIds: [String] = []
-            
-            if removeAll {
-                // Remove all models
-                for fileURL in fileURLs {
-                    try fileManager.removeItem(at: fileURL)
-                    let modelId = fileURL.lastPathComponent
-                    updateModelStatus(modelId: modelId, newStatus: .notDownloaded)
-                    removedModelIds.append(modelId)
-                }
-                
-                // Reset all model statuses
-                for modelId in models.keys {
-                    updateModelStatus(modelId: modelId, newStatus: .notDownloaded)
-                }
-            } else if let modelIds = modelIds {
-                // Remove specific models
-                for modelId in modelIds {
-                    let fileURL = getFileURL(modelId)
-                    if fileURLs.contains(fileURL) {
-                        try fileManager.removeItem(at: fileURL)
-                        updateModelStatus(modelId: modelId, newStatus: .notDownloaded)
-                        removedModelIds.append(modelId)
-                    } else {
-                        log("Model file not found: \(modelId)")
-                    }
-                }
-            }
-            
-            updateTotalModelSize()
-            objectWillChange.send()
-            
-            if removeAll { chatManager.clearContext() }
-
-            let removedModelIdsCopy = removedModelIds
-            Task(priority: .background) {
-                var data: [String: Any] = [:]
-                if !removedModelIdsCopy.isEmpty {
-                    data["modelIds"] = removedModelIdsCopy.joined(separator: ",")
-                }
-                if removeAll { data["removeAll"] = removeAll }
-                self.sendApiEvent(.removeModels, data: data)
-            }
-        } catch {
-            log("Error while removing models: \(error.localizedDescription)", true)
-            throw error
-        }
-    }
-
     private func getFileURL(_ modelId: String) -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent(modelId)
+        do {
+            let applicationSupportDirectoryURL = try getApplicationSupportDirectoryURL()
+            return applicationSupportDirectoryURL.appendingPathComponent(modelId)
+        } catch {
+            log("Error getting file URL: \(error.localizedDescription)", true)
+            return URL(fileURLWithPath: "") // Return an empty URL or handle the error as needed
+        }
+    }
+    
+    private func getApplicationSupportDirectoryURL() throws -> URL {
+        let fileManager = FileManager.default
+        return try fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+    }
+
+    private func enumerateFiles(at directoryURL: URL) throws -> [URL] {
+        let fileManager = FileManager.default
+        return try fileManager.contentsOfDirectory(at: directoryURL, includingPropertiesForKeys: nil)
+    }
+
+    private func removeFiles(at directoryURL: URL, modelIds: [String]) throws {
+        let fileManager = FileManager.default
+        for modelId in modelIds {
+            let fileURL = directoryURL.appendingPathComponent(modelId)
+            if fileManager.fileExists(atPath: fileURL.path) {
+                try fileManager.removeItem(at: fileURL)
+            }
+        }
+    }
+    
+    private func modelFileExists(for modelId: String) -> Bool {
+        do {
+            let applicationSupportDirectoryURL = try getApplicationSupportDirectoryURL()
+            let fileURL = applicationSupportDirectoryURL.appendingPathComponent(modelId)
+            return FileManager.default.fileExists(atPath: fileURL.path)
+        } catch {
+            return false
+        }
+//        let fileManager = FileManager.default
+//        let modelFilePath = getFileURL(modelId).path
+//        return fileManager.fileExists(atPath: modelFilePath)
     }
     
     private func updateModelStatus(modelId: String, newStatus: LPModelStatus) {
-        log("Update model status \(modelId) to \(newStatus)")
         if var model = models[modelId] {
             model.status = newStatus
             models[modelId] = model
+            log("Update model status \(modelId) to \(newStatus)")
             saveModelMetadata()
-            DispatchQueue.main.async {
-                self.objectWillChange.send()
+        } else {
+            log("Model \(modelId) not found for status update")
+        }
+    }
+    
+    private func updateModelStatusIfNeeded(for modelId: String, with model: inout LPModel) {
+        let fileExists = modelFileExists(for: modelId)
+        if fileExists {
+            if model.status != .downloaded {
+                updateModelStatus(modelId: modelId, newStatus: .downloaded)
+                model.status = .downloaded
+                log("Updated model status to downloaded based on file existence")
             }
+        } else if model.status == .downloaded {
+            updateModelStatus(modelId: modelId, newStatus: .notDownloaded)
+            model.status = .notDownloaded
+            log("Updated model status to not downloaded based on file absence")
         }
     }
 
@@ -469,6 +417,8 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         let encoder = JSONEncoder()
         if let encodedData = try? encoder.encode(LPModelMetadataResponse(familyModels: families, models: models, updatedAt: ISO8601DateFormatter().string(from: Date()))) {
             UserDefaults.standard.set(encodedData, forKey: userDefaultsModelMetadataKey)
+        } else {
+            log("Failed to encode model metadata")
         }
     }
 
@@ -501,6 +451,143 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         return remoteDate > localDate
     }
     
+    // MARK: - Private Helper Methods
+
+    private func getAndValidateModel(_ modelId: String) async throws -> LPModel {
+        guard !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw LPError.modelIsEmpty
+        }
+        return try await getModel(modelId)
+    }
+
+    private func loadModelIntoContext(_ model: LPModel) async throws {
+        let startTime = DispatchTime.now()
+        let modelUrl = getFileURL(model.modelId)
+        let context = try LlamaContext.create_context(path: modelUrl.path)
+        chatManager.setContext(context)
+        
+        DispatchQueue.main.async { self.loadedModel = model }
+        
+        let loadTime = Double(DispatchTime.now().uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000_000.0
+        let backend = await context.getBackendInfo()
+        
+        log("\(model.title) loaded in \(String(format: "%.2f", loadTime))s from \(backend)")
+        sendApiEvent(.loadModel, data: ["modelId": model.modelId])
+    }
+
+    private func performModelDownload(_ model: LPModel) async throws {
+        updateModelStatus(modelId: model.modelId, newStatus: .downloading)
+        updateModelProgress(modelId: model.modelId, progress: downloadManager.getProgress(for: model.modelId))
+
+        let downloadUrl = try await getOrFetchDownloadUrl(for: model)
+        let downloadedUrl = try await downloadManager.downloadModel(model, downloadUrl: downloadUrl) { [weak self] modelId, progress in
+            self?.updateModelProgress(modelId: modelId, progress: progress)
+        }
+
+        if FileManager.default.fileExists(atPath: downloadedUrl.path) {
+            updateModelStatus(modelId: model.modelId, newStatus: .downloaded)
+            updateTotalModelSize()
+            sendApiEvent(.downloadModel, data: ["modelId": model.modelId])
+        } else {
+            throw LPError.downloadError(.fileMissing)
+        }
+    }
+
+    private func getOrFetchDownloadUrl(for model: LPModel) async throws -> String {
+        if let downloadUrl = model.downloadUrl {
+            return downloadUrl
+        }
+        let downloadUrl = try await getModelDownloadUrl(modelId: model.modelId)
+        updateModelDownloadUrl(modelId: model.modelId, downloadUrl: downloadUrl)
+        return downloadUrl
+    }
+
+    private func updateModelAfterPause(_ modelId: String, success: Bool) {
+        if success {
+            let progress = downloadManager.getProgress(for: modelId)
+            updateModelStatus(modelId: modelId, newStatus: .paused)
+            updateModelProgress(modelId: modelId, progress: progress)
+        } else {
+            log("Failed to pause download for model: \(modelId)")
+            updateModelStatus(modelId: modelId, newStatus: .notDownloaded)
+        }
+    }
+
+    private func resumeModelDownload(_ model: LPModel, downloadUrl: String) async throws {
+        updateModelStatus(modelId: model.modelId, newStatus: .downloading)
+        
+        let success = try await downloadManager.resumeDownload(model, downloadUrl: downloadUrl) { [weak self] modelId, progress in
+            self?.updateModelProgress(modelId: modelId, progress: progress)
+        }
+        
+        if success {
+            updateModelStatus(modelId: model.modelId, newStatus: .downloading)
+            updateTotalModelSize()
+        } else {
+            log("Failed to resume download for model: \(model.modelId)")
+            updateModelStatus(modelId: model.modelId, newStatus: .paused)
+        }
+        
+        sendApiEvent(.resumeDownloadModel, data: ["modelId": model.modelId])
+    }
+
+    private func performModelRemoval(modelIds: [String]?, removeAll: Bool) async throws {
+        let applicationSupportDirectory = try getApplicationSupportDirectoryURL()
+        
+        guard removeAll || (modelIds != nil && !modelIds!.isEmpty) else {
+            log("No models to remove")
+            return
+        }
+        
+        var removedModelIds: [String] = []
+        
+        if removeAll {
+            removedModelIds = try await removeAllModels(at: applicationSupportDirectory)
+        } else if let modelIds = modelIds {
+            try removeFiles(at: applicationSupportDirectory, modelIds: modelIds)
+            removedModelIds = modelIds
+            for modelId in modelIds {
+                updateModelStatus(modelId: modelId, newStatus: .notDownloaded)
+            }
+        }
+        
+        updateTotalModelSize()
+        objectWillChange.send()
+        
+        if removeAll { chatManager.clearContext() }
+        
+        sendRemoveModelsEvent(removedModelIds: removedModelIds, removeAll: removeAll)
+    }
+
+    private func removeAllModels(at directory: URL) async throws -> [String] {
+        let fileURLs = try enumerateFiles(at: directory)
+        var removedModelIds: [String] = []
+        
+        for fileURL in fileURLs {
+            try FileManager.default.removeItem(at: fileURL)
+            let modelId = fileURL.lastPathComponent
+            updateModelStatus(modelId: modelId, newStatus: .notDownloaded)
+            removedModelIds.append(modelId)
+        }
+        
+        for modelId in models.keys {
+            updateModelStatus(modelId: modelId, newStatus: .notDownloaded)
+        }
+        
+        return removedModelIds
+    }
+
+    private func sendRemoveModelsEvent(removedModelIds: [String], removeAll: Bool) {
+        Task(priority: .background) {
+            var data: [String: Any] = [:]
+            if !removedModelIds.isEmpty {
+                data["modelIds"] = removedModelIds.joined(separator: ",")
+            }
+            if removeAll { data["removeAll"] = removeAll }
+            self.sendApiEvent(.removeModels, data: data)
+        }
+    }
+    
     private func checkForUpdates(remoteModels: [LPModel]) -> [String] {
         var updatedModels: [String] = []
         for remoteModel in remoteModels {
@@ -531,28 +618,6 @@ public class Lightpack: LightpackProtocol, ObservableObject {
             return false // If we can't parse the dates, assume the family is not outdated
         }
         return remoteDate > localDate
-    }
-    
-    public func clearChat() async {
-        chatManager.clearContext()
-        sendApiEvent(.clearChat)
-    }
-    
-    public func chatModel(_ modelId: String? = nil, messages: [LPChatMessage], onToken: @escaping (String) -> Void) async throws {
-        do {
-            let validModelId = cleanModelId(modelId)
-            log("Chat model \(validModelId)")
-            try await loadModel(validModelId)
-            
-            try await chatManager.complete(messages: messages, onToken: onToken)
-            
-            sendApiEvent(.chatModel, data: ["modelId": validModelId])
-            
-            return
-        } catch {
-            log("Error in chat model: \(error)", true)
-            throw error
-        }
     }
     
     private func cleanModelId(_ modelId: String?) -> String {
@@ -989,6 +1054,10 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         private func log(_ message: String) { if enableLogging { print("[Lightpack] \(message)") } }
         init(enableLogging: Bool = true) { self.enableLogging = enableLogging }
         
+        func isDownloadInProgress(for modelId: String) -> Bool {
+            return downloadingModels.contains(modelId) || pausedDownloads.contains(modelId)
+        }
+        
         var observations: [String: NSKeyValueObservation] = [:]
         var resumeData: [String: Data] = [:]
         var downloadProgress: [String: Double] = [:]
@@ -1043,10 +1112,10 @@ public class Lightpack: LightpackProtocol, ObservableObject {
             pausedDownloads.remove(model.modelId)
             
             observations[model.modelId] = task.progress.observe(\.fractionCompleted) { observedProgress, _ in
-                DispatchQueue.main.async {
+//                DispatchQueue.main.async {
                     self.downloadProgress[model.modelId] = observedProgress.fractionCompleted
                     updateModelProgress(model.modelId, observedProgress.fractionCompleted)
-                }
+//                }
             }
             
             completionHandlers[model.modelId] = completion
@@ -1118,34 +1187,46 @@ public class Lightpack: LightpackProtocol, ObservableObject {
             return downloadProgress[modelId] ?? 0.0
         }
         
+        private func getApplicationSupportDirectoryURL() throws -> URL {
+            let fileManager = FileManager.default
+            return try fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        }
+        
+        private func moveFile(from sourceURL: URL, to destinationURL: URL) throws {
+            let fileManager = FileManager.default
+            
+            // Ensure the destination directory exists
+            let destinationDirectory = destinationURL.deletingLastPathComponent()
+            if !fileManager.fileExists(atPath: destinationDirectory.path) {
+                try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true, attributes: nil)
+            }
+            
+            // Remove existing file if it exists
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                try fileManager.removeItem(at: destinationURL)
+            }
+            
+            // Move the file
+            try fileManager.moveItem(at: sourceURL, to: destinationURL)
+            
+            // Verify the file exists and is readable
+            guard fileManager.fileExists(atPath: destinationURL.path) else {
+                throw NSError(domain: "FileNotSaved", code: -1, userInfo: nil)
+            }
+            guard fileManager.isReadableFile(atPath: destinationURL.path) else {
+                throw NSError(domain: "FileNotAccessible", code: -1, userInfo: nil)
+            }
+        }
+        
         func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
             guard let modelId = downloadTask.taskDescription else { return }
-            
-            let fileManager = FileManager.default
-            let applicationSupportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            let destinationURL = applicationSupportDirectory.appendingPathComponent(modelId)
-            
+
             do {
-                // Ensure the application support directory exists
-                if !fileManager.fileExists(atPath: applicationSupportDirectory.path) {
-                    try fileManager.createDirectory(at: applicationSupportDirectory, withIntermediateDirectories: true, attributes: nil)
-                }
+                let applicationSupportDirectory = try getApplicationSupportDirectoryURL()
+                let destinationURL = applicationSupportDirectory.appendingPathComponent(modelId)
                 
-                // If the file already exists, remove it before moving the new one
-                if fileManager.fileExists(atPath: destinationURL.path) {
-                    try fileManager.removeItem(at: destinationURL)
-                }
+                try moveFile(from: location, to: destinationURL)
                 
-                // Move the downloaded file to the application support directory
-                try fileManager.moveItem(at: location, to: destinationURL)
-                
-                // Verify that the file exists and is readable
-                guard fileManager.fileExists(atPath: destinationURL.path) else { throw NSError(domain: "FileNotSaved", code: -1, userInfo: nil) }
-                guard fileManager.isReadableFile(atPath: destinationURL.path) else { throw NSError(domain: "FileNotAccessible", code: -1, userInfo: nil) }
-                
-                log("File successfully saved and is accessible at: \(destinationURL.path)")
-                
-                // Handle the completion of the download on the main thread
                 DispatchQueue.main.async { [weak self] in
                     self?.downloadingModels.remove(modelId)
                     self?.downloadTasks.removeValue(forKey: modelId)

@@ -1,7 +1,7 @@
 import Foundation
 
 public enum LPDownloadError: Error {
-    case notPaused, noTaskFound, fileNotSaved, fileNotAccessible, noDownloadUrl
+    case notPaused, noTaskFound, fileMissing, fileNotSaved, fileNotAccessible, noDownloadUrl
 }
 
 public enum LPError: Error {
