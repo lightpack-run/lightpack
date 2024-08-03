@@ -283,7 +283,7 @@ lightpack.getModels(
         print("Fetched \(response.models.count) models")
         print("Updated model IDs: \(updatedModelIds)")
         response.models.forEach { model in
-            print("Model: \(model.title), Size: \(model.size) bytes")
+            print("Model: \(model.title), Size: \(model.size) GB")
         }
     case .failure(let error):
         print("Error fetching models: \(error)")
@@ -500,7 +500,7 @@ Lightpack exposes several public variables that provide information about the cu
   The currently loaded model, if any. This will be `nil` if no model is currently loaded.
 
 - `totalModelSize: Float`
-  The total size of all downloaded models in bytes.
+  The total size of all downloaded models in GB.
 
 ### Accessing Public Variables
 
@@ -514,7 +514,7 @@ for (modelId, model) in lightpack.models {
     print("Model ID: \(modelId)")
     print("Model Title: \(model.title)")
     print("Model Status: \(model.status)")
-    print("Model Size: \(model.size) bytes")
+    print("Model Size: \(model.size) GB")
     print("---")
 }
 
@@ -526,7 +526,7 @@ if let loadedModel = lightpack.loadedModel {
 }
 
 // Print the total size of all downloaded models
-print("Total size of downloaded models: \(lightpack.totalModelSize) bytes")
+print("Total size of downloaded models: \(lightpack.totalModelSize) GB")
 ```
 
 ### Observing Changes in SwiftUI
@@ -546,7 +546,7 @@ struct ContentView: View {
             } else {
                 Text("No model loaded")
             }
-            Text("Total model size: \(lightpack.totalModelSize) bytes")
+            Text("Total model size: \(lightpack.totalModelSize) GB")
         }
     }
 }
