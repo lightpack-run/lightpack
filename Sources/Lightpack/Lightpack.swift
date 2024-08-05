@@ -8,7 +8,7 @@ import UIKit
 import AppKit
 #endif
 
-public let lightpackVersion = "0.0.3"
+public let lightpackVersion = "0.0.4"
 
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
 public class Lightpack: LightpackProtocol, ObservableObject {
@@ -307,8 +307,9 @@ public class Lightpack: LightpackProtocol, ObservableObject {
     }
 
     public func clearChat() async {
+        log("Context cleared")
         await awaitInitialization()
-        chatManager.clearContext()
+        await chatManager.clear()
         sendApiEvent(.clearChat)
     }
 
@@ -1291,7 +1292,7 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         
         private let contextSizeLimit: Int32 = 2048 // This should match the model's context size
         private let stopTokens: Set<String> = ["User:", "Assistant:", "user:", "assistant:", "</s>", "Human:", "human:", "User", "Assistant", "Human"]
-        private let maxNewLines = 3 // Maximum number of consecutive new lines
+        private let maxNewLines = 10 // Maximum number of consecutive new lines
 
         @Published var messages: [LPChatMessage] = []
         
