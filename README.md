@@ -7,11 +7,11 @@
   <img src="https://img.shields.io/badge/Swift-5.5+-orange.svg" alt="Swift"/>
   <img src="https://img.shields.io/badge/Platforms-iOS%2014+%20|%20macOS%2012+%20|%20tvOS%2014+%20|%20watchOS%206+-blue.svg" alt="Platforms"/>
   <img src="https://img.shields.io/badge/Swift_Package_Manager-compatible-brightgreen.svg" alt="Swift Package Manager"/>
-  <img src="https://img.shields.io/badge/Package%20Size-106%20KB-brightgreen" alt="Package Size"/>
+  <img src="https://img.shields.io/badge/Package%20Size-113%20KB-brightgreen" alt="Package Size"/>
   <img src="https://img.shields.io/github/stars/lightpack-run/lightpack" alt="GitHub stars"/>
 </p>
 
-Run **Llama 3.1** and **Gemma 2** in your app for free. Lightpack lets you chat with your favorite AI models on-device in 3 lines of code. The Swift package is **open-sourced**, supports **offline**, and preserves **privacy** by keeping conversations local.
+**Run Llama 3.1 and Gemma 2 locally** in your iOS and macOS apps in 3 lines of code. Open-source, offline, and private.
 
 ## Installation
 
@@ -20,9 +20,18 @@ Run **Llama 3.1** and **Gemma 2** in your app for free. Lightpack lets you chat 
 To add Lightpack to your Xcode project:
 
 1. In Xcode, select "File" → "Add Packages..."
-2. In the search bar, enter the URL of the Lightpack repository: `https://github.com/lightpack-run/lightpack.git`
-3. Choose the version rule you want to follow (e.g., "Up to Next Major" version)
-4. Click "Add Package"
+2. In the search bar, enter the URL of the Lightpack repository
+```swift
+https://github.com/lightpack-run/lightpack.git
+```
+3. Set the Dependency Rule to "Branch" and select "main"
+4. In the "Add to Target" section, select your app target (e.g., HelloLightpack2)
+5. Choose the version rule you want to follow (e.g., "Up to Next Major" version)
+6. Click "Add Package"
+
+Your package setup should look similar to this:
+
+![Lightpack Package Setup](https://lightpack.run/spm.png)
 
 After installation, you can import Lightpack in your Swift files:
 
@@ -70,13 +79,12 @@ let lightpack = Lightpack(apiKey: "your_api_key")
 
 Replace `"your_api_key"` with the actual API key you copied from the Lightpack website.
 
-**Important**: Keep your API key secure and never share it publicly or commit it to version control systems.
+**Important**: Keep your API key secure and never share it publicly or commit it to version control systems. Usage of API keys is subject to our [Privacy Policy](https://lightpack.run/legal/privacy), which includes information on how we collect and process API usage data.
+
 
 ### Using Lightpack
 
 Here's a simple example to get you started with Lightpack:
-
-[The rest of the Getting Started section remains unchanged]
 
 ```swift
 import Lightpack
@@ -108,7 +116,7 @@ Here's a basic SwiftUI example that demonstrates how to use Lightpack in a chat 
 import SwiftUI
 import Lightpack
 
-struct ChatView: View {
+struct ContentView: View {
     @StateObject private var lightpack = Lightpack(apiKey: "your_api_key")
     @State private var userInput = ""
     @State private var chatMessages: [LPChatMessage] = []
@@ -178,6 +186,10 @@ struct MessageView: View {
         }
         .padding(.horizontal)
     }
+}
+
+#Preview {
+    ContentView()
 }
 ```
 
@@ -254,16 +266,16 @@ Here are quick code snippets for each of the core functions provided by Lightpac
 
 ```swift
 lightpack.getModels(
-    bitMax: 6,
-    bitMin: 2,
-    familyIds: ["3dbcfe36-17fc-45b8-acb6-b3af2c320431", "50be08ec-d6a1-45c8-8c6f-efa34ee9ba17"],
+    bitMax: 8,
+    bitMin: 0,
+    familyIds: ["3dbcfe36-17fc-45b8-acb6-b3af2c320431"],
     modelIds: nil,
     page: 1,
     pageSize: 10,
-    parameterIds: ["1.1B", "7B"],
-    quantizationIds: ["q4_0", "q5_1"],
+    parameterIds: ["8B"],
+    quantizationIds: ["Q4_K_M"],
     sizeMax: 5,  // 5 GB
-    sizeMin: 0.5,   // 500 MB
+    sizeMin: 1,   // 500 MB
     sort: "size:desc"
 ) { result in
     switch result {
@@ -271,7 +283,7 @@ lightpack.getModels(
         print("Fetched \(response.models.count) models")
         print("Updated model IDs: \(updatedModelIds)")
         response.models.forEach { model in
-            print("Model: \(model.title), Size: \(model.size) bytes")
+            print("Model: \(model.title), Size: \(model.size) GB")
         }
     case .failure(let error):
         print("Error fetching models: \(error)")
@@ -283,8 +295,8 @@ lightpack.getModels(
 
 ```swift
 lightpack.getModelFamilies(
-    familyIds: ["3dbcfe36-17fc-45b8-acb6-b3af2c320431", "50be08ec-d6a1-45c8-8c6f-efa34ee9ba17"],
-    modelParameterIds: ["1.1B", "7B"],
+    familyIds: ["3dbcfe36-17fc-45b8-acb6-b3af2c320431"],
+    modelParameterIds: ["8B"],
     page: 1,
     pageSize: 5,
     sort: "title:asc"
@@ -309,71 +321,83 @@ _Replace the example `"23a77013-fe73-4f26-9ab2-33d315a71924"` with your actual m
 #### Download a model
 
 ```swift
-do {
-    try await lightpack.downloadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
-    print("Model downloaded successfully")
-} catch {
-    print("Error downloading model: \(error)")
+Task {
+  do {
+      try await lightpack.downloadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
+      print("Model downloaded successfully")
+  } catch {
+      print("Error downloading model: \(error)")
+  }
 }
 ```
 
 #### Pause a model download
 
 ```swift
-do {
-    try await lightpack.pauseDownloadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
-    print("Model download paused")
-} catch {
-    print("Error pausing download: \(error)")
+Task {
+  do {
+      try await lightpack.pauseDownloadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
+      print("Model download paused")
+  } catch {
+      print("Error pausing download: \(error)")
+  }
 }
 ```
 
 #### Resume a model download
 
 ```swift
-do {
-    try await lightpack.resumeDownloadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
-    print("Model download resumed")
-} catch {
-    print("Error resuming download: \(error)")
+Task {
+  do {
+      try await lightpack.resumeDownloadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
+      print("Model download resumed")
+  } catch {
+      print("Error resuming download: \(error)")
+  }
 }
 ```
 
 #### Cancel a model download
 
 ```swift
-do {
-    try await lightpack.cancelDownloadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
-    print("Model download cancelled")
-} catch {
-    print("Error cancelling download: \(error)")
+Task {
+  do {
+      try await lightpack.cancelDownloadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
+      print("Model download cancelled")
+  } catch {
+      print("Error cancelling download: \(error)")
+  }
 }
 ```
 
 #### Remove models
 
 ```swift
-do {
-    // Remove specific models
-    try await lightpack.removeModels(modelIds: ["model_id_1", "model_id_2"], removeAll: false)
-    
-    // Or remove all models
-    // try await lightpack.removeModels(removeAll: true)
-    
-    print("Models removed successfully")
-} catch {
-    print("Error removing models: \(error)")
+Task {
+  do {
+      // Remove specific models
+      try await lightpack.removeModels(modelIds: ["model_id_1", "model_id_2"], removeAll: false)
+      
+      // Or remove all models
+      // try await lightpack.removeModels(removeAll: true)
+      
+      print("Models removed successfully")
+  } catch {
+      print("Error removing models: \(error)")
+  }
 }
 ```
 
 #### Load a model
 
 ```swift
-do {
-    try await lightpack.loadModel("23a77013-fe73-4f26-9ab2-33d315a71924", setActive: true)
-    print("Model loaded and set as active")
-} catch {
-    print("Error loading model: \(error)")
+Task {
+  do {
+      try await lightpack.loadModel("23a77013-fe73-4f26-9ab2-33d315a71924")
+      print("Model loaded and set as active")
+  } catch {
+      print("Error loading model: \(error)")
+  }
 }
 ```
 
@@ -382,27 +406,31 @@ do {
 #### Chat with a model
 
 ```swift
-do {
-    let messages = [
-        LPChatMessage(role: .user, content: "Why is water blue?")
-    ]
-    
-    try await lightpack.chatModel("23a77013-fe73-4f26-9ab2-33d315a71924", messages: messages) { token in
-        print(token)
-    }
-} catch {
-    print("Error in chat: \(error)")
+Task {
+  do {
+      let messages = [
+          LPChatMessage(role: .user, content: "Why is water blue?")
+      ]
+      
+      try await lightpack.chatModel("23a77013-fe73-4f26-9ab2-33d315a71924", messages: messages) { token in
+          print(token)
+      }
+  } catch {
+      print("Error in chat: \(error)")
+  }
 }
 ```
 
 #### Clear chat history
 
 ```swift
-do {
-    try await lightpack.clearChat()
-    print("Chat history cleared")
-} catch {
-    print("Error clearing chat: \(error)")
+Task {
+  do {
+      try await lightpack.clearChat()
+      print("Chat history cleared")
+  } catch {
+      print("Error clearing chat: \(error)")
+  }
 }
 ```
 
@@ -472,7 +500,7 @@ Lightpack exposes several public variables that provide information about the cu
   The currently loaded model, if any. This will be `nil` if no model is currently loaded.
 
 - `totalModelSize: Float`
-  The total size of all downloaded models in bytes.
+  The total size of all downloaded models in GB.
 
 ### Accessing Public Variables
 
@@ -486,7 +514,7 @@ for (modelId, model) in lightpack.models {
     print("Model ID: \(modelId)")
     print("Model Title: \(model.title)")
     print("Model Status: \(model.status)")
-    print("Model Size: \(model.size) bytes")
+    print("Model Size: \(model.size) GB")
     print("---")
 }
 
@@ -498,7 +526,7 @@ if let loadedModel = lightpack.loadedModel {
 }
 
 // Print the total size of all downloaded models
-print("Total size of downloaded models: \(lightpack.totalModelSize) bytes")
+print("Total size of downloaded models: \(lightpack.totalModelSize) GB")
 ```
 
 ### Observing Changes in SwiftUI
@@ -518,7 +546,7 @@ struct ContentView: View {
             } else {
                 Text("No model loaded")
             }
-            Text("Total model size: \(lightpack.totalModelSize) bytes")
+            Text("Total model size: \(lightpack.totalModelSize) GB")
         }
     }
 }
@@ -568,14 +596,20 @@ Before submitting a new bug report, please search the existing issues to see if 
 
 We appreciate your help in improving Lightpack!
 
+## Privacy and Data Collection
+
+Lightpack is designed with privacy in mind, operating primarily on-device. However, we do collect certain analytics and usage data to improve our services. For full details on what data we collect and how we use it, please refer to our [Privacy Policy](https://lightpack.run/legal/privacy).
+
+## Terms of Service and Privacy
+
+By using Lightpack, you agree to our [Terms of Service](https://lightpack.run/legal/terms). We encourage you to read these terms and our [Privacy Policy](https://lightpack.run/legal/privacy) to understand your rights and responsibilities when using our service.
+
 ## Model Licenses
 
 Please see the model licenses in [Available Model Families](#available-model-families) or [Lightpack Models](https://lightpack.run/models). Different models may have different licensing terms, so it's important to review the specific license for each model you intend to use.
 
 ## Support
 
-If you need assistance or have any questions about Lightpack, please don't hesitate to reach out. You can contact the founders directly at [founders@lightpack.run](mailto:founders@lightpack.run).
+If you need assistance or have any questions about Lightpack, including inquiries about our privacy practices or terms of service, please don't hesitate to reach out. You can contact the founders directly at [founders@lightpack.run](mailto:founders@lightpack.run).
 
-We strive to respond to all inquiries as quickly as possible and appreciate your feedback and questions.
-
-We hope you find Lightpack useful for your AI-powered Swift applications! If you have any questions or run into any issues, please don't hesitate to reach out.
+We strive to respond to all inquiries as quickly as possible and appreciate your feedback and questions. For more information on how we handle your data, please see our [Privacy Policy](https://lightpack.run/legal/privacy).
