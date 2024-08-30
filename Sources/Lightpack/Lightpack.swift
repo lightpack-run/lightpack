@@ -8,7 +8,7 @@ import UIKit
 import AppKit
 #endif
 
-public let lightpackVersion = "0.0.4"
+public let lightpackVersion = "0.0.6"
 
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
 public class Lightpack: LightpackProtocol, ObservableObject {
@@ -174,7 +174,7 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         DispatchQueue.main.async {
             self.models = models
             self.families = families
-            self.log("Updated models and families published: \(models), \(families)")
+            self.log("Updated models and families")
         }
     }
     
@@ -184,145 +184,198 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         }
     }
     
-    private func getModel(_ modelId: String) async throws -> LPModel {
-        log("Getting model \(modelId), current status: \(models[modelId]?.status ?? .notDownloaded)")
-        guard !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw LPError.modelIsEmpty
-        }
-
-        if var model = models[modelId] {
-            let fileExists = modelFileExists(for: modelId)
+    private func getModel(alias: String?, modelId: String?) async throws -> LPModel {
+        func updateModelStatus(_ model: inout LPModel, fileExists: Bool) {
             if fileExists && model.status != .downloaded {
                 model.status = .downloaded
-                models[modelId] = model
-                saveModelMetadata() // Save the updated status
                 log("Updated model status to downloaded based on file existence")
             } else if !fileExists && model.status == .downloaded {
                 model.status = .notDownloaded
-                models[modelId] = model
-                saveModelMetadata() // Save the updated status
                 log("Updated model status to not downloaded based on file absence")
             }
-            return model
         }
 
+        // Check modelId first
+        if let modelId = modelId, !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            log("Checking model with ID: \(modelId)")
+            if var model = models[modelId] {
+                let fileExists = modelFileExists(for: modelId)
+                updateModelStatus(&model, fileExists: fileExists)
+                models[modelId] = model
+                saveModelMetadata()
+                return model
+            }
+        }
+
+        // If modelId not found or invalid, check alias
+        if let alias = alias, !alias.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            log("Checking model with alias: \(alias)")
+            if let modelId = models.values.first(where: { $0.alias == alias })?.modelId,
+               var model = models[modelId] {
+                let fileExists = modelFileExists(for: modelId)
+                updateModelStatus(&model, fileExists: fileExists)
+                models[modelId] = model
+                saveModelMetadata()
+                return model
+            }
+        }
+
+        // If model not found locally, check network
         try checkNetworkConnectivity()
-        
+        log("Model not found locally. Checking network...")
+
         return try await withCheckedThrowingContinuation { continuation in
-            getModels(modelIds: [modelId]) { result in
+            let idToCheck = modelId ?? alias ?? ""
+            getModels(modelIds: [idToCheck]) { result in
                 switch result {
                 case .success((let response, _)):
                     if let model = response.models.first {
+                        self.models[model.modelId] = model
+                        self.saveModelMetadata()
+                        self.log("Model found on network: \(model.modelId)")
                         continuation.resume(returning: model)
                     } else {
+                        self.log("Model not found on network")
                         continuation.resume(throwing: LPError.modelNotFound)
                     }
                 case .failure(let error):
-                    let errorMessage = "Network request failed: \(error.localizedDescription)"
+                    self.log("Network request failed: \(error.localizedDescription)")
                     continuation.resume(throwing: LPError.networkError(error))
                 }
             }
         }
     }
-    
-    public func loadModel(_ modelId: String) async throws {
-        await awaitInitialization()
-        log("Loading model \(modelId)")
-        
-        let model = try await getAndValidateModel(modelId)
-        
-        if model.status == .notDownloaded || model.status == .paused {
-            try await downloadModel(modelId)
+
+    private func getAndValidateModel(alias: String?, modelId: String?) async throws -> LPModel {
+        // Check if both alias and modelId are nil or empty strings
+        guard let nonEmptyAlias = alias?.trimmingCharacters(in: .whitespacesAndNewlines), !nonEmptyAlias.isEmpty,
+              let nonEmptyModelId = modelId?.trimmingCharacters(in: .whitespacesAndNewlines), !nonEmptyModelId.isEmpty else {
+            throw LPError.modelIsEmpty
         }
         
-        if modelId != loadedModel?.modelId {
+        // If we reach here, at least one of alias or modelId is non-empty
+        return try await getModel(alias: nonEmptyAlias, modelId: nonEmptyModelId)
+    }
+
+    public func loadModel(alias: String?, modelId: String?) async throws {
+        await awaitInitialization()
+        log("Loading model (alias: \(alias ?? "nil"), modelId: \(modelId ?? "nil"))")
+
+        let model = try await getAndValidateModel(alias: alias, modelId: modelId)
+
+        if model.status == .notDownloaded || model.status == .paused {
+            try await downloadModel(alias: alias, modelId: modelId)
+        }
+
+        if model.modelId != loadedModel?.modelId {
             try await loadModelIntoContext(model)
         }
     }
 
-    public func downloadModel(_ modelId: String) async throws {
+    public func downloadModel(alias: String?, modelId: String?) async throws {
         await awaitInitialization()
-        log("Download model \(modelId)")
+        log("Download model (alias: \(alias ?? "nil"), modelId: \(modelId ?? "nil"))")
 
-        let model = try await getAndValidateModel(modelId)
-        
+        let model = try await getAndValidateModel(alias: alias, modelId: modelId)
+
         guard model.status != .downloaded else {
-            log("Model \(modelId) is already downloaded. Skipping download process.")
+            log("Model \(model.modelId) is already downloaded. Skipping download process.")
             return
         }
-        
-        guard !downloadManager.isDownloadInProgress(for: modelId) else {
-            log("Download for model \(modelId) is already in progress.")
+
+        guard !downloadManager.isDownloadInProgress(for: model.modelId) else {
+            log("Download for model \(model.modelId) is already in progress.")
             return
         }
 
         try await performModelDownload(model)
     }
 
-    public func pauseDownloadModel(_ modelId: String) async throws {
+    public func pauseDownloadModel(alias: String?, modelId: String?) async throws {
         await awaitInitialization()
-        log("Pause download model \(modelId)")
-        
-        let model = try await getAndValidateModel(modelId)
+        log("Pause download model (alias: \(alias ?? "nil"), modelId: \(modelId ?? "nil"))")
+
+        let model = try await getAndValidateModel(alias: alias, modelId: modelId)
         let success = try await downloadManager.pauseDownload(model)
-        
-        updateModelAfterPause(modelId, success: success)
-        sendApiEvent(.pauseDownloadModel, data: ["modelId": modelId])
+
+        updateModelAfterPause(model.modelId, success: success)
+        sendApiEvent(.pauseDownloadModel, data: ["modelId": model.modelId])
     }
 
     @MainActor
-    public func resumeDownloadModel(_ modelId: String) async throws {
+    public func resumeDownloadModel(alias: String?, modelId: String?) async throws {
         await awaitInitialization()
-        log("Resume download model \(modelId)")
-        
+        log("Resume download model (alias: \(alias ?? "nil"), modelId: \(modelId ?? "nil"))")
+
         try checkNetworkConnectivity()
-        let model = try await getAndValidateModel(modelId)
-        
+        let model = try await getAndValidateModel(alias: alias, modelId: modelId)
+
         guard let downloadUrl = model.downloadUrl else {
             throw LPError.downloadError(.noDownloadUrl)
         }
-        
+
         try await resumeModelDownload(model, downloadUrl: downloadUrl)
     }
 
-    public func cancelDownloadModel(_ modelId: String) async throws {
+    public func cancelDownloadModel(alias: String?, modelId: String?) async throws {
         await awaitInitialization()
-        log("Cancel download model \(modelId)")
-        
-        let model = try await getAndValidateModel(modelId)
+        log("Cancel download model (alias: \(alias ?? "nil"), modelId: \(modelId ?? "nil"))")
+
+        let model = try await getAndValidateModel(alias: alias, modelId: modelId)
         downloadManager.cancelDownload(model)
-        
-        updateModelStatus(modelId: modelId, newStatus: .notDownloaded)
-        updateModelProgress(modelId: modelId, progress: 0)
+
+        updateModelStatus(modelId: model.modelId, newStatus: .notDownloaded)
+        updateModelProgress(modelId: model.modelId, progress: 0)
         objectWillChange.send()
-        
-        sendApiEvent(.cancelDownloadModel, data: ["modelId": modelId])
+
+        sendApiEvent(.cancelDownloadModel, data: ["modelId": model.modelId])
     }
 
-    public func removeModels(modelIds: [String]? = nil, removeAll: Bool = false) async throws {
+    public func removeModels(aliases: [String]?, modelIds: [String]?, removeAll: Bool = false) async throws {
         await awaitInitialization()
-        log("Removing models: \(modelIds ?? []), removeAll: \(removeAll)")
-        
-        try await performModelRemoval(modelIds: modelIds, removeAll: removeAll)
+        log("Removing models: (aliases: \(aliases ?? []), modelIds: \(modelIds ?? [])), removeAll: \(removeAll)")
+
+        if removeAll {
+            try await performModelRemoval(modelIds: nil, removeAll: true)
+        } else {
+            var modelsToRemove = Set<String>()
+
+            if let modelIds = modelIds {
+                modelsToRemove.formUnion(modelIds)
+            }
+
+            if let aliases = aliases {
+                let aliasModelIds = models.values
+                    .filter { aliases.contains($0.alias) }
+                    .map { $0.modelId }
+                modelsToRemove.formUnion(aliasModelIds)
+            }
+
+            if !modelsToRemove.isEmpty {
+                try await performModelRemoval(modelIds: Array(modelsToRemove), removeAll: false)
+            } else {
+                log("No models to remove")
+            }
+        }
     }
 
+    public func chatModel(alias: String?, modelId: String?, messages: [LPChatMessage], onToken: @escaping (String) -> Void) async throws {
+        await awaitInitialization()
+
+        let model = try await getAndValidateModel(alias: alias, modelId: modelId)
+        log("Chat model \(model.modelId)")
+
+        try await loadModel(alias: alias, modelId: modelId)
+        try await chatManager.complete(messages: messages, onToken: onToken)
+
+        sendApiEvent(.chatModel, data: ["modelId": model.modelId])
+    }
+    
     public func clearChat() async {
         log("Context cleared")
         await awaitInitialization()
         await chatManager.clear()
         sendApiEvent(.clearChat)
-    }
-
-    public func chatModel(_ modelId: String? = nil, messages: [LPChatMessage], onToken: @escaping (String) -> Void) async throws {
-        await awaitInitialization()
-        
-        let validModelId = cleanModelId(modelId)
-        log("Chat model \(validModelId)")
-        
-        try await loadModel(validModelId)
-        try await chatManager.complete(messages: messages, onToken: onToken)
-        
-        sendApiEvent(.chatModel, data: ["modelId": validModelId])
     }
     
     private func getModelDownloadUrl(modelId: String) async throws -> String {
@@ -453,13 +506,6 @@ public class Lightpack: LightpackProtocol, ObservableObject {
     }
     
     // MARK: - Private Helper Methods
-
-    private func getAndValidateModel(_ modelId: String) async throws -> LPModel {
-        guard !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw LPError.modelIsEmpty
-        }
-        return try await getModel(modelId)
-    }
 
     private func loadModelIntoContext(_ model: LPModel) async throws {
         let startTime = DispatchTime.now()
@@ -634,6 +680,7 @@ public class Lightpack: LightpackProtocol, ObservableObject {
     }
     
     public func getModels(
+        aliases: [String]? = nil,
         bitMax: Int? = nil,
         bitMin: Int? = nil,
         familyIds: [String]? = nil,
@@ -648,24 +695,77 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         completion: @escaping (Result<(LPModelsResponse, [String]), LPError>) -> Void
     ) {
         var parameters: [String: String] = [:]
-        
+        var validationMessages: [String] = []
+
         // Validate and add numeric parameters
-        if let bitMax = bitMax, bitMax > 0 { parameters["bitMax"] = String(bitMax) }
-        if let bitMin = bitMin, bitMin > 0 { parameters["bitMin"] = String(bitMin) }
-        if let page = page, page > 0 { parameters["page"] = String(page) }
-        if let pageSize = pageSize, pageSize > 0 { parameters["pageSize"] = String(pageSize) }
-        if let sizeMax = sizeMax, sizeMax > 0 { parameters["sizeMax"] = String(sizeMax) }
-        if let sizeMin = sizeMin, sizeMin > 0 { parameters["sizeMin"] = String(sizeMin) }
-        
+        if let bitMax = bitMax {
+            if bitMax > 0 {
+                parameters["bitMax"] = String(bitMax)
+            } else {
+                validationMessages.append("bitMax must be greater than 0")
+            }
+        }
+        if let bitMin = bitMin {
+            if bitMin > 0 {
+                parameters["bitMin"] = String(bitMin)
+            } else {
+                validationMessages.append("bitMin must be greater than 0")
+            }
+        }
+        if let page = page {
+            if page > 0 {
+                parameters["page"] = String(page)
+            } else {
+                validationMessages.append("page must be greater than 0")
+            }
+        }
+        if let pageSize = pageSize {
+            if pageSize > 0 && pageSize <= 100 {
+                parameters["pageSize"] = String(pageSize)
+            } else {
+                validationMessages.append("pageSize must be between 1 and 100")
+            }
+        }
+        if let sizeMax = sizeMax {
+            if sizeMax > 0 {
+                parameters["sizeMax"] = String(sizeMax)
+            } else {
+                validationMessages.append("sizeMax must be greater than 0")
+            }
+        }
+        if let sizeMin = sizeMin {
+            if sizeMin > 0 {
+                parameters["sizeMin"] = String(sizeMin)
+            } else {
+                validationMessages.append("sizeMin must be greater than 0")
+            }
+        }
+
         // Clean and add array parameters
+        if let aliases = cleanAndJoinArray(aliases) { parameters["aliases"] = aliases }
         if let familyIds = cleanAndJoinArray(familyIds) { parameters["familyIds"] = familyIds }
         if let modelIds = cleanAndJoinArray(modelIds) { parameters["modelIds"] = modelIds }
         if let parameterIds = cleanAndJoinArray(parameterIds) { parameters["parameterIds"] = parameterIds }
         if let quantizationIds = cleanAndJoinArray(quantizationIds) { parameters["quantizationIds"] = quantizationIds }
-        
+
         // Validate and add sort parameter
-        if let sort = sort?.trimmingCharacters(in: .whitespacesAndNewlines), !sort.isEmpty { parameters["sort"] = sort }
-        
+        if let sort = sort?.trimmingCharacters(in: .whitespacesAndNewlines), !sort.isEmpty {
+            let sortComponents = sort.split(separator: ":")
+            if sortComponents.count == 2 && ["asc", "desc"].contains(sortComponents[1]) {
+                parameters["sort"] = sort
+            } else {
+                validationMessages.append("Invalid sort format. Should be 'field:asc' or 'field:desc'")
+            }
+        }
+
+        // Log validation messages and return early if there are issues
+        if !validationMessages.isEmpty {
+            let logMessage = "getModels validation issues: " + validationMessages.joined(separator: ", ")
+            log(logMessage)
+            completion(.failure(LPError.validationError(message: logMessage)))
+            return
+        }
+
         performRequest(parameters: parameters, apiType: .getModels) { [weak self] (result: Result<LPModelsResponse, LPError>) in
             switch result {
             case .success(let response):
@@ -679,28 +779,79 @@ public class Lightpack: LightpackProtocol, ObservableObject {
     }
 
     public func getModelFamilies(
+        aliases: [String]? = nil,
+        authors: [String]? = nil,
         familyIds: [String]? = nil,
         modelParameterIds: [String]? = nil,
         page: Int? = nil,
         pageSize: Int? = nil,
         sort: String? = nil,
+        titles: [String]? = nil,
+        updatedAfter: String? = nil,
+        updatedBefore: String? = nil,
         completion: @escaping (Result<(LPModelFamiliesResponse, [String]), LPError>) -> Void
     ) {
         var parameters: [String: String] = [:]
-        
+        var validationMessages: [String] = []
+
         // Clean and add array parameters
+        if let aliases = cleanAndJoinArray(aliases) { parameters["aliases"] = aliases }
+        if let authors = cleanAndJoinArray(authors) { parameters["authors"] = authors }
         if let familyIds = cleanAndJoinArray(familyIds) { parameters["familyIds"] = familyIds }
         if let modelParameterIds = cleanAndJoinArray(modelParameterIds) { parameters["modelParameterIds"] = modelParameterIds }
-        
+        if let titles = cleanAndJoinArray(titles) { parameters["titles"] = titles }
+
         // Validate and add numeric parameters
-        if let page = page, page > 0 { parameters["page"] = String(page) }
-        if let pageSize = pageSize, pageSize > 0 { parameters["pageSize"] = String(pageSize) }
-        
+        if let page = page {
+            if page > 0 {
+                parameters["page"] = String(page)
+            } else {
+                validationMessages.append("page must be greater than 0")
+            }
+        }
+        if let pageSize = pageSize {
+            if pageSize > 0 && pageSize <= 100 {
+                parameters["pageSize"] = String(pageSize)
+            } else {
+                validationMessages.append("pageSize must be between 1 and 100")
+            }
+        }
+
         // Validate and add sort parameter
         if let sort = sort?.trimmingCharacters(in: .whitespacesAndNewlines), !sort.isEmpty {
-            parameters["sort"] = sort
+            let sortComponents = sort.split(separator: ":")
+            if sortComponents.count == 2 && ["asc", "desc"].contains(sortComponents[1]) {
+                parameters["sort"] = sort
+            } else {
+                validationMessages.append("Invalid sort format. Should be 'field:asc' or 'field:desc'")
+            }
         }
-        
+
+        // Validate and add date parameters
+        let dateFormatter = ISO8601DateFormatter()
+        if let updatedAfter = updatedAfter {
+            if dateFormatter.date(from: updatedAfter) != nil {
+                parameters["updatedAfter"] = updatedAfter
+            } else {
+                validationMessages.append("updatedAfter must be a valid ISO8601 date string")
+            }
+        }
+        if let updatedBefore = updatedBefore {
+            if dateFormatter.date(from: updatedBefore) != nil {
+                parameters["updatedBefore"] = updatedBefore
+            } else {
+                validationMessages.append("updatedBefore must be a valid ISO8601 date string")
+            }
+        }
+
+        // Log validation messages and return early if there are issues
+        if !validationMessages.isEmpty {
+            let logMessage = "getModelFamilies validation issues: " + validationMessages.joined(separator: ", ")
+            log(logMessage)
+            completion(.failure(LPError.validationError(message: logMessage)))
+            return
+        }
+
         performRequest(parameters: parameters, apiType: .getModelFamilies) { [weak self] (result: Result<LPModelFamiliesResponse, LPError>) in
             switch result {
             case .success(let response):
@@ -714,16 +865,21 @@ public class Lightpack: LightpackProtocol, ObservableObject {
     }
     
     private func getModelDownload(
-        modelId: String,
+        alias: String? = nil,
+        modelId: String? = nil,
         completion: @escaping (Result<LPModelDownloadResponse, LPError>) -> Void
     ) {
-        let trimmedModelId = modelId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedModelId.isEmpty else {
-            completion(.failure(.invalidInput("ModelId is required and cannot be empty")))
+        guard let alias = alias?.trimmingCharacters(in: .whitespacesAndNewlines), !alias.isEmpty else {
+            guard let modelId = modelId?.trimmingCharacters(in: .whitespacesAndNewlines), !modelId.isEmpty else {
+                completion(.failure(.invalidInput("Either alias or modelId is required and cannot be empty")))
+                return
+            }
+            let parameters = ["modelId": modelId]
+            performRequest(parameters: parameters, apiType: .getModelDownload, completion: completion)
             return
         }
-
-        let parameters = ["modelId": trimmedModelId]
+        
+        let parameters = ["alias": alias]
         performRequest(parameters: parameters, apiType: .getModelDownload, completion: completion)
     }
     
@@ -871,7 +1027,7 @@ public class Lightpack: LightpackProtocol, ObservableObject {
                 completion(.failure(.networkError(error)))
                 return
             }
-            
+        
             guard let httpResponse = response as? HTTPURLResponse else {
                 completion(.failure(.invalidResponse))
                 return

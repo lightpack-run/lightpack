@@ -17,6 +17,7 @@ public enum LPError: Error {
     case networkError(Error)
     case noData
     case unknownError(String)
+    case validationError(message: String)
 }
 
 public struct LPErrorResponse: Codable {
@@ -53,6 +54,7 @@ public enum LPModelFileTypes: String, Codable {
 
 public struct LPModel: Identifiable, Equatable, Codable {
     public var id: String { modelId }
+    public var alias: String
     public let bits: Double
     public var downloadProgress: Double = 0
     private var _downloadUrl: String?
@@ -71,11 +73,12 @@ public struct LPModel: Identifiable, Equatable, Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case bits, familyId, modelId, parameterId, quantizationId, size, title, updatedAt
+        case alias, bits, familyId, modelId, parameterId, quantizationId, size, title, updatedAt
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        alias = try container.decode(String.self, forKey: .alias)
         bits = try container.decode(Double.self, forKey: .bits)
         familyId = try container.decode(String.self, forKey: .familyId)
         modelId = try container.decode(String.self, forKey: .modelId)
@@ -89,9 +92,22 @@ public struct LPModel: Identifiable, Equatable, Codable {
 
 public struct LPModelFamily: Codable {
     public let familyId: String
-    public let modelParameterIds: [String]
+    public let alias: String
+    public let author: String
+    public let defaultModelId: String
+    public let gitHub: String
+    public let huggingFace: String
+    public let image: String
+    public let license: String
+    public let paper: String
+    public let parameters: [ParameterConfig]
     public let title: String
     public let updatedAt: String
+
+    public struct ParameterConfig: Codable {
+        public let parameterId: String
+        public let defaultQuantizationId: String
+    }
 }
 
 public struct LPModelDownloadResponse: Codable {
