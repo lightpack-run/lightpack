@@ -63,6 +63,8 @@ public struct LPModel: Identifiable, Equatable, Codable {
     public let parameterId: String
     public let quantizationId: String
     public let size: Double
+    public let specialTokens: String
+    public let template: String
     public var status: LPModelStatus = .notDownloaded
     public let title: String
     public let updatedAt: String
@@ -73,7 +75,7 @@ public struct LPModel: Identifiable, Equatable, Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case alias, bits, familyId, modelId, parameterId, quantizationId, size, title, updatedAt
+        case alias, bits, familyId, modelId, parameterId, quantizationId, size, specialTokens, template, title, updatedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -85,6 +87,8 @@ public struct LPModel: Identifiable, Equatable, Codable {
         parameterId = try container.decode(String.self, forKey: .parameterId)
         quantizationId = try container.decode(String.self, forKey: .quantizationId)
         size = try container.decode(Double.self, forKey: .size)
+        specialTokens = try container.decode(String.self, forKey: .specialTokens)
+        template = try container.decode(String.self, forKey: .template)
         title = try container.decode(String.self, forKey: .title)
         updatedAt = try container.decode(String.self, forKey: .updatedAt)
     }
@@ -94,19 +98,23 @@ public struct LPModelFamily: Codable {
     public let familyId: String
     public let alias: String
     public let author: String
+    public let defaultAliasIds: [DefaultAliasId]
     public let defaultModelId: String
     public let gitHub: String
     public let huggingFace: String
     public let image: String
     public let license: String
     public let paper: String
-    public let parameters: [ParameterConfig]
     public let title: String
     public let updatedAt: String
 
-    public struct ParameterConfig: Codable {
+    public struct DefaultAliasId: Codable {
         public let parameterId: String
         public let defaultQuantizationId: String
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case familyId, alias, author, defaultAliasIds, defaultModelId, gitHub, huggingFace, image, license, paper, title, updatedAt
     }
 }
 
@@ -136,7 +144,7 @@ public struct LPPostEventResponse: Codable {
 
 public enum LPApiType: String {
     case clearChat = "clearChat"
-    case cancelDownloadModel = "cancelDownloadModel"
+    case cancelDownloadingModel = "cancelDownloadingModel"
     case chatModel = "chatModel"
     case downloadModel = "downloadModel"
     case getModelDownload = "getModelDownload"
@@ -144,14 +152,20 @@ public enum LPApiType: String {
     case getModels = "getModels"
     case loadModel = "loadModel"
     case packageError = "packageError"
-    case pauseDownloadModel = "pauseDownloadModel"
+    case pauseDownloadingModel = "pauseDownloadingModel"
     case postEvent = "postEvent"
     case removeModels = "removeModels"
-    case resumeDownloadModel = "resumeDownloadModel"
+    case resumeDownloadingModel = "resumeDownloadingModel"
 }
 
 enum LPChatError: Error {
-    case noModelId, contextNotInitialized, tokenizationFailed, completionFailed, unknownError
+    case completionFailed,
+         contextNotInitialized,
+         modelNotSet,
+         promptFormattingFailed,
+         noModelId,
+         tokenizationFailed,
+         unknownError
 }
 
 public enum LPLlamaError: Error {
@@ -165,30 +179,34 @@ public enum LPLlamaError: Error {
 }
 
 public enum LPMessageType: String, Codable, Equatable {
-    case assistant, system, user
+    case assistant, system, tool, user
 }
 
-public struct LPChatMessage: Codable, Equatable {
+public struct LPChatMessage: Codable, Equatable, Identifiable {
+    public let id: UUID
     public let role: LPMessageType
     public var content: String
     
     public init(role: LPMessageType, content: String) {
+        self.id = UUID()
         self.role = role
         self.content = content
     }
     
     enum CodingKeys: String, CodingKey {
-        case role, content
+        case id, role, content
     }
     
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
         role = try container.decode(LPMessageType.self, forKey: .role)
         content = try container.decode(String.self, forKey: .content)
     }
     
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
         try container.encode(role, forKey: .role)
         try container.encode(content, forKey: .content)
     }

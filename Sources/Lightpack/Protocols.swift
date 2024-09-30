@@ -15,7 +15,11 @@ public protocol LightpackProtocol {
     var loadedModel: LPModel? { get }
 
     /// The total size of all downloaded models in bytes.
-    var totalModelSize: Float { get }
+    var totalModelSize: Double { get }
+    
+    /// Indicates whether any model is currently in the process of downloading.
+    /// This is `true` if at least one model has a status of `.downloading`, and `false` otherwise.
+    var isDownloading: Bool { get }
     
     /// Clears the current chat context.
     ///
@@ -31,7 +35,7 @@ public protocol LightpackProtocol {
     ///   - alias: The alias of the model to cancel download for (e.g., "qwen2").
     ///   - modelId: The unique identifier of the model to cancel download for (e.g., "23a77013-fe73-4f26-9ab2-33d315a71924").
     /// - Throws: An error if the cancellation process fails.
-    func cancelDownloadModel(alias: String?, modelId: String?) async throws
+    func cancelDownloadingModel(alias: String?, modelId: String?) async throws
 
     /// Initiates a chat interaction with a specified model.
     ///
@@ -65,7 +69,7 @@ public protocol LightpackProtocol {
     ///   - alias: The alias of the model to pause download for (e.g., "qwen2").
     ///   - modelId: The unique identifier of the model to pause download for (e.g., "23a77013-fe73-4f26-9ab2-33d315a71924").
     /// - Throws: An error if the pause operation fails.
-    func pauseDownloadModel(alias: String?, modelId: String?) async throws
+    func pauseDownloadingModel(alias: String?, modelId: String?) async throws
 
     /// Removes one or more models from the local storage.
     ///
@@ -82,7 +86,7 @@ public protocol LightpackProtocol {
     ///   - alias: The alias of the model to resume download for (e.g., "qwen2").
     ///   - modelId: The unique identifier of the model to resume download for (e.g., "23a77013-fe73-4f26-9ab2-33d315a71924").
     /// - Throws: An error if the resume operation fails.
-    func resumeDownloadModel(alias: String?, modelId: String?) async throws
+    func resumeDownloadingModel(alias: String?, modelId: String?) async throws
 
     /// Retrieves a list of models based on specified criteria.
     ///

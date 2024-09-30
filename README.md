@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/github/stars/lightpack-run/lightpack" alt="GitHub stars"/>
 </p>
 
-**Run Llama 3.1 and Gemma 2 locally** in your iOS and macOS apps in 3 lines of code. Open-source, offline, and private.
+**Run Llama 3.2 and Gemma 2 locally** in your iOS and macOS apps in 3 lines of code. Open-source, offline, and private.
 
 ## Installation
 
@@ -44,7 +44,7 @@ import Lightpack
 If you're developing a Swift package, add the following line to your `Package.swift` file's dependencies:
 
 ```swift
-.package(url: "https://github.com/lightpack-run/lightpack.git", from: "0.0.1")
+.package(url: "https://github.com/lightpack-run/lightpack.git", from: "0.0.6")
 ```
 
 Then, include "Lightpack" as a dependency for your target:
@@ -102,7 +102,7 @@ do {
     
     print("Full response: \(response)")
 } catch {
-    print("Error: \(error)")
+    print("[Lightpack] Error: \(error)")
 }
 ```
 
@@ -160,7 +160,7 @@ struct ContentView: View {
                 isLoading = false
                 userInput = ""
             } catch {
-                print("Error: \(error)")
+                print("[Lightpack] Error: \(error)")
                 isLoading = false
             }
         }

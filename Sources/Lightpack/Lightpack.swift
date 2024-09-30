@@ -15,8 +15,12 @@ public class Lightpack: LightpackProtocol, ObservableObject {
     @Published public private(set) var models: [String: LPModel] = [:]
     @Published public private(set) var families: [String: LPModelFamily] = [:]
     @Published public private(set) var loadedModel: LPModel?
-    @Published public private(set) var totalModelSize: Float = 0.0
+    @Published public private(set) var totalModelSize: Double = 0.0
     @Published private(set) var isInitialized: Bool = false
+    
+    public var isDownloading: Bool {
+        models.values.contains { $0.status == .downloading }
+    }
     
     private let apiKey: String
     
@@ -91,8 +95,9 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         }
     }
 
-    private func updateModelsAndFamilies(with metadata: LPModelMetadataResponse, applicationSupportDirectoryURL: URL) async {
-        await MainActor.run {
+    private func updateModelsAndFamilies(with metadata: LPModelMetadataResponse, applicationSupportDirectoryURL: URL) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
             for (modelId, model) in metadata.models {
                 var updatedModel = model
                 let fileURL = applicationSupportDirectoryURL.appendingPathComponent(modelId)
@@ -106,19 +111,36 @@ public class Lightpack: LightpackProtocol, ObservableObject {
     }
 
     private func saveAndMergeModelMetadata(models: [LPModel]? = nil, families: [LPModelFamily]? = nil) {
-        let existingMetadata = loadExistingMetadata()
-        
-        let mergedModels = mergeModels(newModels: models, existingModels: self.models)
-        let mergedFamilies = mergeFamilies(newFamilies: families, existingFamilies: existingMetadata?.familyModels ?? [:])
-        
-        let newMetadata = LPModelMetadataResponse(
-            familyModels: mergedFamilies,
-            models: mergedModels,
-            updatedAt: ISO8601DateFormatter().string(from: Date())
-        )
-        
-        saveMetadataToUserDefaults(newMetadata)
-        updateCurrentModelsAndFamilies(models: mergedModels, families: mergedFamilies)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            let existingMetadata = self.loadExistingMetadata()
+            
+            var updatedModels = self.models
+            var updatedFamilies = existingMetadata?.familyModels ?? [:]
+            var didUpdate = false
+            
+            if let newModels = models, !newModels.isEmpty {
+                updatedModels = self.mergeModels(newModels: newModels, existingModels: self.models)
+                didUpdate = true
+            }
+            
+            if let newFamilies = families, !newFamilies.isEmpty {
+                updatedFamilies = self.mergeFamilies(newFamilies: newFamilies, existingFamilies: existingMetadata?.familyModels ?? [:])
+                didUpdate = true
+            }
+            
+            if didUpdate {
+                let newMetadata = LPModelMetadataResponse(
+                    familyModels: updatedFamilies,
+                    models: updatedModels,
+                    updatedAt: ISO8601DateFormatter().string(from: Date())
+                )
+                
+                self.saveMetadataToUserDefaults(newMetadata)
+                self.updateCurrentModelsAndFamilies(models: updatedModels, families: updatedFamilies)
+                self.log("Updated metadata saved")
+            }
+        }
     }
 
     private func loadExistingMetadata() -> LPModelMetadataResponse? {
@@ -171,10 +193,10 @@ public class Lightpack: LightpackProtocol, ObservableObject {
     }
 
     private func updateCurrentModelsAndFamilies(models: [String: LPModel], families: [String: LPModelFamily]) {
-        DispatchQueue.main.async {
-            self.models = models
-            self.families = families
-            self.log("Updated models and families")
+        DispatchQueue.main.async { [weak self] in
+            self?.models = models
+            self?.families = families
+            self?.log("Updated models and families")
         }
     }
     
@@ -185,6 +207,8 @@ public class Lightpack: LightpackProtocol, ObservableObject {
     }
     
     private func getModel(alias: String?, modelId: String?) async throws -> LPModel {
+        await awaitInitialization()
+
         func updateModelStatus(_ model: inout LPModel, fileExists: Bool) {
             if fileExists && model.status != .downloaded {
                 model.status = .downloaded
@@ -198,11 +222,10 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         // Check modelId first
         if let modelId = modelId, !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             log("Checking model with ID: \(modelId)")
-            if var model = models[modelId] {
+            if var model = await getModelFromStore(id: modelId) {
                 let fileExists = modelFileExists(for: modelId)
                 updateModelStatus(&model, fileExists: fileExists)
-                models[modelId] = model
-                saveModelMetadata()
+                await updateModelInStore(model)
                 return model
             }
         }
@@ -210,12 +233,10 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         // If modelId not found or invalid, check alias
         if let alias = alias, !alias.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             log("Checking model with alias: \(alias)")
-            if let modelId = models.values.first(where: { $0.alias == alias })?.modelId,
-               var model = models[modelId] {
-                let fileExists = modelFileExists(for: modelId)
+            if var model = await getModelByAlias(alias) {
+                let fileExists = modelFileExists(for: model.modelId)
                 updateModelStatus(&model, fileExists: fileExists)
-                models[modelId] = model
-                saveModelMetadata()
+                await updateModelInStore(model)
                 return model
             }
         }
@@ -226,38 +247,66 @@ public class Lightpack: LightpackProtocol, ObservableObject {
 
         return try await withCheckedThrowingContinuation { continuation in
             let idToCheck = modelId ?? alias ?? ""
-            getModels(modelIds: [idToCheck]) { result in
-                switch result {
-                case .success((let response, _)):
-                    if let model = response.models.first {
-                        self.models[model.modelId] = model
-                        self.saveModelMetadata()
-                        self.log("Model found on network: \(model.modelId)")
-                        continuation.resume(returning: model)
-                    } else {
-                        self.log("Model not found on network")
-                        continuation.resume(throwing: LPError.modelNotFound)
+            getModels(modelIds: [idToCheck]) { [weak self] result in
+                guard let self = self else { return }
+                
+                // Ensure we are on the main thread when updating UI and `@Published` properties
+                Task { @MainActor in
+                    switch result {
+                    case .success((let response, _)):
+                        if let model = response.models.first {
+                            // Ensure that `updateModelInStore` is running on the main thread
+                            await self.updateModelInStore(model)
+                            self.log("Model found on network: \(model.modelId)")
+                            continuation.resume(returning: model)
+                        } else {
+                            self.log("Model not found in Lightpack. Please try another model")
+                            continuation.resume(throwing: LPError.modelNotFound)
+                        }
+                    case .failure(let error):
+                        self.log("Network request failed: \(error.localizedDescription)")
+                        continuation.resume(throwing: LPError.networkError(error))
                     }
-                case .failure(let error):
-                    self.log("Network request failed: \(error.localizedDescription)")
-                    continuation.resume(throwing: LPError.networkError(error))
                 }
             }
         }
     }
 
+    private func getModelFromStore(id: String) async -> LPModel? {
+        await MainActor.run { models[id] }
+    }
+
+    private func getModelByAlias(_ alias: String) async -> LPModel? {
+        await MainActor.run {
+            models.values.first { $0.alias == alias }
+        }
+    }
+
+    @MainActor
+    private func updateModelInStore(_ model: LPModel) {
+        models[model.modelId] = model
+        saveModelMetadata()
+    }
+
     private func getAndValidateModel(alias: String?, modelId: String?) async throws -> LPModel {
-        // Check if both alias and modelId are nil or empty strings
-        guard let nonEmptyAlias = alias?.trimmingCharacters(in: .whitespacesAndNewlines), !nonEmptyAlias.isEmpty,
-              let nonEmptyModelId = modelId?.trimmingCharacters(in: .whitespacesAndNewlines), !nonEmptyModelId.isEmpty else {
+        let trimmedAlias = alias?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedModelId = modelId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        guard let validInput = trimmedAlias.flatMap({ $0.isEmpty ? nil : $0 }) ??
+                               trimmedModelId.flatMap({ $0.isEmpty ? nil : $0 }) else {
             throw LPError.modelIsEmpty
         }
         
         // If we reach here, at least one of alias or modelId is non-empty
-        return try await getModel(alias: nonEmptyAlias, modelId: nonEmptyModelId)
+        if !validInput.isEmpty {
+            return try await getModel(alias: trimmedAlias, modelId: trimmedModelId)
+        } else {
+            throw LPError.modelIsEmpty
+        }
     }
 
-    public func loadModel(alias: String?, modelId: String?) async throws {
+    @MainActor
+    public func loadModel(alias: String? = nil, modelId: String? = nil) async throws {
         await awaitInitialization()
         log("Loading model (alias: \(alias ?? "nil"), modelId: \(modelId ?? "nil"))")
 
@@ -272,7 +321,8 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         }
     }
 
-    public func downloadModel(alias: String?, modelId: String?) async throws {
+    @MainActor
+    public func downloadModel(alias: String? = nil, modelId: String? = nil) async throws {
         await awaitInitialization()
         log("Download model (alias: \(alias ?? "nil"), modelId: \(modelId ?? "nil"))")
 
@@ -291,7 +341,8 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         try await performModelDownload(model)
     }
 
-    public func pauseDownloadModel(alias: String?, modelId: String?) async throws {
+    @MainActor
+    public func pauseDownloadingModel(alias: String? = nil, modelId: String? = nil) async throws {
         await awaitInitialization()
         log("Pause download model (alias: \(alias ?? "nil"), modelId: \(modelId ?? "nil"))")
 
@@ -299,11 +350,11 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         let success = try await downloadManager.pauseDownload(model)
 
         updateModelAfterPause(model.modelId, success: success)
-        sendApiEvent(.pauseDownloadModel, data: ["modelId": model.modelId])
+        sendApiEvent(.pauseDownloadingModel, data: ["modelId": model.modelId])
     }
 
     @MainActor
-    public func resumeDownloadModel(alias: String?, modelId: String?) async throws {
+    public func resumeDownloadingModel(alias: String? = nil, modelId: String? = nil) async throws {
         await awaitInitialization()
         log("Resume download model (alias: \(alias ?? "nil"), modelId: \(modelId ?? "nil"))")
 
@@ -315,9 +366,12 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         }
 
         try await resumeModelDownload(model, downloadUrl: downloadUrl)
+        
+        sendApiEvent(.resumeDownloadingModel, data: ["modelId": model.modelId])
     }
 
-    public func cancelDownloadModel(alias: String?, modelId: String?) async throws {
+    @MainActor
+    public func cancelDownloadingModel(alias: String? = nil, modelId: String? = nil) async throws {
         await awaitInitialization()
         log("Cancel download model (alias: \(alias ?? "nil"), modelId: \(modelId ?? "nil"))")
 
@@ -328,10 +382,11 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         updateModelProgress(modelId: model.modelId, progress: 0)
         objectWillChange.send()
 
-        sendApiEvent(.cancelDownloadModel, data: ["modelId": model.modelId])
+        sendApiEvent(.cancelDownloadingModel, data: ["modelId": model.modelId])
     }
 
-    public func removeModels(aliases: [String]?, modelIds: [String]?, removeAll: Bool = false) async throws {
+    @MainActor
+    public func removeModels(aliases: [String]? = nil, modelIds: [String]? = nil, removeAll: Bool = false) async throws {
         await awaitInitialization()
         log("Removing models: (aliases: \(aliases ?? []), modelIds: \(modelIds ?? [])), removeAll: \(removeAll)")
 
@@ -359,14 +414,15 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         }
     }
 
-    public func chatModel(alias: String?, modelId: String?, messages: [LPChatMessage], onToken: @escaping (String) -> Void) async throws {
+    @MainActor
+    public func chatModel(alias: String? = nil, modelId: String? = nil, messages: [LPChatMessage], onToken: @escaping (String) -> Void) async throws {
         await awaitInitialization()
 
         let model = try await getAndValidateModel(alias: alias, modelId: modelId)
         log("Chat model \(model.modelId)")
 
         try await loadModel(alias: alias, modelId: modelId)
-        try await chatManager.complete(messages: messages, onToken: onToken)
+        try await chatManager.complete(messages: messages, model: model, onToken: onToken)
 
         sendApiEvent(.chatModel, data: ["modelId": model.modelId])
     }
@@ -442,13 +498,16 @@ public class Lightpack: LightpackProtocol, ObservableObject {
     }
     
     private func updateModelStatus(modelId: String, newStatus: LPModelStatus) {
-        if var model = models[modelId] {
-            model.status = newStatus
-            models[modelId] = model
-            log("Update model status \(modelId) to \(newStatus)")
-            saveModelMetadata()
-        } else {
-            log("Model \(modelId) not found for status update")
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if var model = self.models[modelId] {
+                model.status = newStatus
+                self.models[modelId] = model
+                self.log("Update model status \(modelId) to \(newStatus)")
+                self.saveModelMetadata()
+            } else {
+                self.log("Model \(modelId) not found for status update")
+            }
         }
     }
     
@@ -477,23 +536,29 @@ public class Lightpack: LightpackProtocol, ObservableObject {
     }
 
     private func updateModelProgress(modelId: String, progress: Double) {
-        log("Update model progress \(modelId) to \(progress)")
-        if var model = models[modelId] {
-            model.downloadProgress = progress
-            models[modelId] = model
-            if progress >= 1.0 {
-                updateModelStatus(modelId: modelId, newStatus: .downloaded)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if var model = self.models[modelId] {
+                model.downloadProgress = progress
+                self.models[modelId] = model
+                if progress >= 1.0 {
+                    self.updateModelStatus(modelId: modelId, newStatus: .downloaded)
+                    log("Downloaded!")
+                } else {
+                    let percentage = min(floor(progress * 1000) / 10, 99.9)
+                    log("Download progress: \(String(format: "%.1f", percentage))%")
+                }
             }
-            objectWillChange.send()
         }
     }
     
     private func updateTotalModelSize() {
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
             self.totalModelSize = self.models.values
                 .filter { $0.status == .downloaded }
-                .map { Float($0.size) }
-                .reduce(0.0 as Float, +)
+                .map { Double($0.size) }
+                .reduce(0.0, +)
         }
     }
     
@@ -574,8 +639,6 @@ public class Lightpack: LightpackProtocol, ObservableObject {
             log("Failed to resume download for model: \(model.modelId)")
             updateModelStatus(modelId: model.modelId, newStatus: .paused)
         }
-        
-        sendApiEvent(.resumeDownloadModel, data: ["modelId": model.modelId])
     }
 
     private func performModelRemoval(modelIds: [String]?, removeAll: Bool) async throws {
@@ -599,7 +662,6 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         }
         
         updateTotalModelSize()
-        objectWillChange.send()
         
         if removeAll { chatManager.clearContext() }
         
@@ -848,18 +910,27 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         if !validationMessages.isEmpty {
             let logMessage = "getModelFamilies validation issues: " + validationMessages.joined(separator: ", ")
             log(logMessage)
-            completion(.failure(LPError.validationError(message: logMessage)))
+            DispatchQueue.main.async {
+                completion(.failure(LPError.validationError(message: logMessage)))
+            }
             return
         }
 
         performRequest(parameters: parameters, apiType: .getModelFamilies) { [weak self] (result: Result<LPModelFamiliesResponse, LPError>) in
-            switch result {
-            case .success(let response):
-                let updatedFamilies = self?.checkForFamilyUpdates(remoteFamilies: response.modelFamilies) ?? []
-                self?.saveAndMergeModelMetadata(models: nil, families: response.modelFamilies)
-                completion(.success((response, updatedFamilies)))
-            case .failure(let error):
-                completion(.failure(error))
+            DispatchQueue.main.async {
+                guard let self = self else {
+                    completion(.failure(LPError.unknownError("Self is nil")))
+                    return
+                }
+                
+                switch result {
+                case .success(let response):
+                    let updatedFamilies = self.checkForFamilyUpdates(remoteFamilies: response.modelFamilies)
+                    self.saveAndMergeModelMetadata(models: nil, families: response.modelFamilies)
+                    completion(.success((response, updatedFamilies)))
+                case .failure(let error):
+                    completion(.failure(error))
+                }
             }
         }
     }
@@ -1434,11 +1505,6 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         private let benchmarkCompletionTime: TimeInterval = 5.0 // seconds
         private let NS_PER_S = 1_000_000_000.0
         
-        private let beginOfText = "<|begin_of_text|>"
-        private let startHeaderId = "<|start_header_id|>"
-        private let endHeaderId = "<|end_header_id|>"
-        private let eotId = "<|eot_id|>"
-        
         private var llamaContext: LlamaContext?
         private var isInitialHeatUp = true
         
@@ -1447,8 +1513,6 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         @Published var completionTime: TimeInterval = 0
         
         private let contextSizeLimit: Int32 = 2048 // This should match the model's context size
-        private let stopTokens: Set<String> = ["User:", "Assistant:", "user:", "assistant:", "</s>", "Human:", "human:", "User", "Assistant", "Human"]
-        private let maxNewLines = 10 // Maximum number of consecutive new lines
 
         @Published var messages: [LPChatMessage] = []
         
@@ -1474,176 +1538,226 @@ public class Lightpack: LightpackProtocol, ObservableObject {
             isInitialHeatUp = true
         }
         
-        func complete(messages: [LPChatMessage], onToken: @escaping (String) -> Void) async throws {
+        func complete(messages: [LPChatMessage], model: LPModel, onToken: @escaping (String) -> Void) async throws {
             guard let llamaContext = llamaContext else { throw LPChatError.contextNotInitialized }
 
             self.messages = messages
 
+            let startTime = Date()
+            let initialMemory = getMemoryUsage()
+
             let formattedPrompt: String
             do { formattedPrompt = try await formatPrompt() } catch { throw LPChatError.tokenizationFailed }
 
-            log("Formatted prompt:\n\(formattedPrompt)")
+            await llamaContext.completion_init(model: model, text: formattedPrompt)
 
-            await llamaContext.completion_init(text: formattedPrompt)
-
-            var assistantResponse = ""
-            var tokenCount: Int32 = 0
-            var newLineCount = 0
-            var partialStopToken = ""
+            let generationStartTime = DispatchTime.now()
 
             let promptTokens = await llamaContext.get_n_tokens()
             let remainingTokens = max(0, contextSizeLimit - promptTokens)
             let maxTokens: Int32 = min(remainingTokens, 1000) // Limit to 1000 tokens or remaining context, whichever is smaller
 
-            log("Starting token generation loop (remaining tokens: \(remainingTokens), max tokens: \(maxTokens))")
+            let specialTokens = specialTokensForModel(model.specialTokens)
 
-            while tokenCount < maxTokens {
-                let result = await llamaContext.completion_loop()
-                let trimmedResult = tokenCount == 0 ? result.trimmingCharacters(in: .whitespaces) : result
-                log("Token generated: \(trimmedResult)")
+            var accumulatedToken = ""
+            var potentialStopSequence = ""
+            var tokenCount: Int32 = 0
+            var attempts = 0
+            let maxAttempts = 3
+            var isFirstContentToken = true
+            var pendingWhitespace = ""
+            var hasSeenAssistantTag = false
+            
+            let assistantStartToken = findAssistantStartToken(model: model)
+            var hasSeenAssistantStartToken = false
+            var accumulatedStartToken = ""
 
-                // Check for new lines
-                if trimmedResult == "\n" {
-                    newLineCount += 1
-                } else {
-                    newLineCount = 0
-                }
+            while attempts < maxAttempts {
+                while tokenCount < maxTokens {
+                    let (result, isDone) = await llamaContext.completion_loop()
+                    potentialStopSequence += result
 
-                if newLineCount >= maxNewLines {
-                    log("Max new lines reached, breaking loop")
-                    break
-                }
+                    // Check for complete stop tokens
+                    if let completeStopToken = findCompleteStopToken(model: model, sequence: potentialStopSequence) {
+                        pendingWhitespace = ""
+                        break
+                    }
 
-                // Check for stop sequences
-                partialStopToken += trimmedResult
-                if shouldStop(partialStopToken) {
-                    log("Stop sequence detected")
-                    break
-                }
-                
-                // Reset partial stop token if it gets too long
-                if partialStopToken.count > 20 { partialStopToken = String(partialStopToken.suffix(10)) }
+                    // Handle the start token for assistant
+                    if !hasSeenAssistantStartToken {
+                        accumulatedStartToken += result
+                        if accumulatedStartToken.hasSuffix(assistantStartToken) {
+                            hasSeenAssistantStartToken = true
+                            tokenCount += Int32(assistantStartToken.utf8.count)
+                            potentialStopSequence = String(potentialStopSequence.dropLast(assistantStartToken.count))
+                            accumulatedStartToken = ""
+                            continue
+                        }
+                    }
 
-                if !isPartOfStopSequence(trimmedResult) {
-                    assistantResponse += trimmedResult
-                    tokenCount += 1
-                    onToken(trimmedResult)
-                }
+                    // Process tokens that are not part of stop sequences
+                    let (processedToken, remainingSequence) = processNonStopTokens(model: model, sequence: potentialStopSequence)
+                    potentialStopSequence = remainingSequence
 
-                if await llamaContext.n_cur % 10 == 0 { await updateMetrics() }
-            }
+                    if !processedToken.isEmpty {
+                        if processedToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            if !isFirstContentToken {
+                                pendingWhitespace += processedToken
+                            }
+                        } else {
+                            if isFirstContentToken {
+                                let trimmedToken = processedToken.trimmingCharacters(in: .whitespaces)
+                                onToken(trimmedToken)
+                                accumulatedToken += trimmedToken
+                                tokenCount += Int32(trimmedToken.utf8.count)
+                                isFirstContentToken = false
+                            } else if !pendingWhitespace.isEmpty {
+                                onToken(pendingWhitespace)
+                                accumulatedToken += pendingWhitespace
+                                tokenCount += Int32(pendingWhitespace.utf8.count)
+                                pendingWhitespace = ""
+                            } else {
+                                onToken(processedToken)
+                                accumulatedToken += processedToken
+                                tokenCount += Int32(processedToken.utf8.count)
+                            }
+                        }
+                    }
 
-            log("Token generation loop completed")
+                    if isDone {
+                        log("Generation complete or stopped")
+                        break
+                    }
 
-            // Clean up the response
-            assistantResponse = cleanResponse(assistantResponse)
-            log("Final assistant response: \(assistantResponse)")
-
-            if !assistantResponse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                if isResponseCoherent(assistantResponse) {
-                    self.messages.append(LPChatMessage(role: .assistant, content: assistantResponse))
-                } else {
-                    let fixedResponse = tryToFixResponse(assistantResponse)
-                    if !fixedResponse.isEmpty {
-                        self.messages.append(LPChatMessage(role: .assistant, content: fixedResponse))
-                    } else {
-                        log("Discarded incoherent response")
+                    if await llamaContext.n_cur % 10 == 0 {
+                        await updateMetrics()
                     }
                 }
+
+                if !accumulatedToken.isEmpty {
+                    break
+                } else {
+                    attempts += 1
+                    tokenCount = 0
+                    accumulatedToken = ""
+                    potentialStopSequence = ""
+                    pendingWhitespace = ""
+                    isFirstContentToken = true
+                    hasSeenAssistantTag = false
+                    await llamaContext.completion_init(model: model, text: formattedPrompt)
+                }
             }
+
+            if accumulatedToken.isEmpty {
+                log("Failed to generate a non-empty response after \(maxAttempts) attempts.")
+            }
+
+            let generationEndTime = DispatchTime.now()
+            let t_generation = Double(generationEndTime.uptimeNanoseconds - generationStartTime.uptimeNanoseconds) / Double(NSEC_PER_SEC)
+            
+            let tokens_per_second = t_generation > 0 ? Double(tokenCount) / t_generation : 0
+            
+            let finalMemory = getMemoryUsage()
+            
+            completionTime = Date().timeIntervalSince(startTime)
+            let systemMessage = formatMetrics(t_heat: 0, tokens_per_second: tokens_per_second, finalMemory: finalMemory - initialMemory)
+            log(systemMessage)
+            self.messages.append(LPChatMessage(role: .system, content: systemMessage))
+            
+            if isInitialHeatUp { isInitialHeatUp = false }
+        }
+        
+        // LEFT OFF: Remove this hard code. If needed - do more testing
+        func findAssistantStartToken(model: LPModel) -> String {
+            let specialTokens = specialTokensForModel(model.specialTokens)
+            return specialTokens.start.first(where: { $0.contains("assistant") }) ?? "<|im_start|>assistant"
+        }
+        
+        func findCompleteStopToken(model: LPModel, sequence: String) -> String? {
+            let specialTokens = specialTokensForModel(model.specialTokens)
+            return specialTokens.stop.first { sequence.hasSuffix($0) }
+        }
+
+        func processNonStopTokens(model: LPModel, sequence: String) -> (processedToken: String, remainingSequence: String) {
+            let specialTokens = specialTokensForModel(model.specialTokens)
+            let stopTokenPrefixes = Set(specialTokens.stop.compactMap { $0.first.map(String.init) })
+            
+            var processedToken = ""
+            var remainingSequence = sequence
+            
+            while !remainingSequence.isEmpty {
+                if let firstChar = remainingSequence.first, stopTokenPrefixes.contains(String(firstChar)) {
+                    break
+                }
+                processedToken.append(remainingSequence.removeFirst())
+            }
+            
+            return (processedToken, remainingSequence)
+        }
+
+        func specialTokensForModel(_ specialTokens: String) -> (start: [String], stop: [String]) {
+            guard let data = specialTokens.data(using: .utf8),
+                  let json = try? JSONDecoder().decode([String: [String]].self, from: data),
+                  let startTokens = json["start"],
+                  let stopTokens = json["stop"] else {
+                return ([], [])
+            }
+            return (start: startTokens, stop: stopTokens)
         }
         
         // MARK: - Private Methods
         private func log(_ message: String) { if enableLogging { print("[Lightpack] \(message)") } }
         
-        private func shouldStop(_ text: String) -> Bool {
-                stopTokens.contains { text.lowercased().hasSuffix($0.lowercased()) }
+        private func formatPrompt() async throws -> String {
+            guard let llamaContext = llamaContext else {
+                throw LPChatError.contextNotInitialized
             }
 
-        private func isPartOfStopSequence(_ text: String) -> Bool {
-            stopTokens.contains { text.lowercased().contains($0.lowercased()) }
-        }
-        
-        private func cleanResponse(_ response: String) -> String {
-            var cleaned = response.trimmingCharacters(in: .whitespacesAndNewlines)
-            for stopToken in stopTokens {
-                while cleaned.lowercased().hasSuffix(stopToken) {
-                    if let range = cleaned.range(of: stopToken, options: [.caseInsensitive, .backwards]) {
-                        cleaned = String(cleaned[..<range.lowerBound])
-                    }
-                    cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
-                }
+            let model = await llamaContext.getModel()
+
+            // Convert messages to llama_chat_message format
+            var llamaMessages = messages.map { message -> llama_chat_message in
+                let roleCString = strdup(message.role.rawValue)
+                let contentCString = strdup(message.content)
+                return llama_chat_message(
+                    role: roleCString,
+                    content: contentCString
+                )
             }
-            while cleaned.hasSuffix(":") {
-                cleaned = String(cleaned.dropLast())
-                cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let bufferSize = 16384
+            var buffer = [CChar](repeating: 0, count: bufferSize)
+
+            // Call llama_chat_apply_template
+            let result = llama_chat_apply_template(
+                model,
+                nil,
+                &llamaMessages,  // Pass the address of the first element
+                llamaMessages.count,
+                false,
+                &buffer,
+                Int32(bufferSize)
+            )
+
+            if result < 0 {
+                throw LPChatError.promptFormattingFailed
             }
-            return cleaned
-        }
-        
-        private func isResponseCoherent(_ response: String) -> Bool {
-            let minLength = 10
-            let hasSentenceStructure = response.contains(where: { ".!?".contains($0) })
-            return response.count >= minLength && hasSentenceStructure
-        }
-        
-        private func tryToFixResponse(_ response: String) -> String {
-            if let lastSentenceRange = response.range(of: "[^.!?]+[.!?]", options: [.regularExpression, .backwards]) {
-                return String(response[response.startIndex...lastSentenceRange.upperBound])
+
+            let formattedPrompt = String(cString: buffer)
+
+            // Clean up allocated memory
+            for message in llamaMessages {
+                free(UnsafeMutablePointer(mutating: message.role))
+                free(UnsafeMutablePointer(mutating: message.content))
             }
-            return ""
-        }
-        
-        private func formatPrompt() async throws -> String {
-            var formattedMessages = messages.map { message -> String in
-                switch message.role {
-                case .system:
-                    return message.content
-                case .user:
-                    return "User: \(message.content)"
-                case .assistant:
-                    return "Assistant: \(message.content)"
-                }
+
+            // Fallback: If the formatted prompt is empty, create a basic format
+            if formattedPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let fallbackPrompt = messages.map { "\($0.role.rawValue): \($0.content)" }.joined(separator: "\n")
+                return fallbackPrompt
             }
-            
-            let promptTemplate = """
-            {CONVERSATION}
-            Assistant:
-            """
-            
-            let conversation = formattedMessages.joined(separator: "\n\n")
-            var prompt = promptTemplate.replacingOccurrences(of: "{CONVERSATION}", with: conversation)
-            
-            // Check if the prompt exceeds the context size limit
-            var tokens: [llama_token]
-            do {
-                tokens = try await tokenizeString(prompt)
-            } catch {
-                throw LPChatError.tokenizationFailed
-            }
-            
-            while tokens.count > Int(contextSizeLimit) {
-                if formattedMessages.count > 1 {
-                    formattedMessages.removeFirst()
-                    let updatedConversation = formattedMessages.joined(separator: "\n\n")
-                    prompt = promptTemplate.replacingOccurrences(of: "{CONVERSATION}", with: updatedConversation)
-                } else {
-                    break // Can't remove more without losing the last exchange
-                }
-                
-                do {
-                    tokens = try await tokenizeString(prompt)
-                } catch {
-                    throw LPChatError.tokenizationFailed
-                }
-            }
-            
-            return prompt
-        }
-        
-        private func tokenizeString(_ string: String) async throws -> [llama_token] {
-            guard let llamaContext = llamaContext else { throw LPChatError.contextNotInitialized }
-            return await llamaContext.tokenize(text: string, add_bos: true)
+
+            return formattedPrompt
         }
         
         private func getPerformanceLabel(value: Double, benchmark: Double, lowerIsBetter: Bool) -> String {
@@ -1697,6 +1811,7 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         
         private func formatMetrics(t_heat: Double, tokens_per_second: Double, finalMemory: Double) -> String {
       """
+      
       \(isInitialHeatUp ? "Initial heat up" : "Heat up") took \(String(format: "%.2f", t_heat))s
       Generated in \(String(format: "%.2f", tokens_per_second)) t/s
       Total time: \(String(format: "%.2f", completionTime))s \(getPerformanceLabel(value: completionTime, benchmark: benchmarkCompletionTime, lowerIsBetter: true))
@@ -1719,15 +1834,22 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         }
     }
     
+    enum LlamaError: Error {
+        case couldNotInitializeContext
+    }
+
     actor LlamaContext {
-        private var enableLogging: Bool = true
+        private var enableLogging: Bool
         private func log(_ message: String) { if enableLogging { print("[Lightpack] \(message)") } }
-        
+
         private var model: OpaquePointer
         private var context: OpaquePointer
+        private var sampling: UnsafeMutablePointer<llama_sampler>
         private var batch: llama_batch
         private var tokens_list: [llama_token]
+        
         var is_done: Bool = false
+        var specialTokens: String? = nil
 
         /// This variable is used to store temporarily invalid cchars
         private var temporary_invalid_cchars: [CChar]
@@ -1740,50 +1862,64 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         init(model: OpaquePointer, context: OpaquePointer, enableLogging: Bool = true) {
             self.model = model
             self.context = context
+            self.enableLogging = enableLogging
             self.tokens_list = []
             self.batch = llama_batch_init(512, 0, 1)
             self.temporary_invalid_cchars = []
-            self.enableLogging = enableLogging
+            let sparams = llama_sampler_chain_default_params()
+            self.sampling = llama_sampler_chain_init(sparams)
+            llama_sampler_chain_add(self.sampling, llama_sampler_init_temp(0.4))
+            llama_sampler_chain_add(self.sampling, llama_sampler_init_softmax())
+            llama_sampler_chain_add(self.sampling, llama_sampler_init_dist(1234))
         }
 
         deinit {
+            llama_sampler_free(sampling)
             llama_batch_free(batch)
             llama_free(context)
             llama_free_model(model)
             llama_backend_free()
         }
+        
+        func getModel() -> OpaquePointer {
+            return model
+        }
 
-        static func create_context(path: String) throws -> LlamaContext {
+        static func create_context(path: String, enableLogging: Bool = true) throws -> LlamaContext {
             llama_backend_init()
             var model_params = llama_model_default_params()
 
     #if targetEnvironment(simulator)
             model_params.n_gpu_layers = 0
-//            log("Running on simulator, force use n_gpu_layers = 0")
+            if enableLogging { print("Running on simulator, force use n_gpu_layers = 0") }
     #endif
             let model = llama_load_model_from_file(path, model_params)
-            guard let model else { throw LPLlamaError.couldNotInitializeContext }
+            guard let model else {
+                if enableLogging { print("Could not load model at \(path)") }
+                throw LlamaError.couldNotInitializeContext
+            }
 
             let n_threads = max(1, min(8, ProcessInfo.processInfo.processorCount - 2))
+            if enableLogging { print("Using \(n_threads) threads") }
 
             var ctx_params = llama_context_default_params()
-            ctx_params.seed  = 1234
             ctx_params.n_ctx = 2048
-            ctx_params.n_threads       = UInt32(n_threads)
-            ctx_params.n_threads_batch = UInt32(n_threads)
+            ctx_params.n_threads       = Int32(n_threads)
+            ctx_params.n_threads_batch = Int32(n_threads)
 
             let context = llama_new_context_with_model(model, ctx_params)
-            guard let context else { throw LPLlamaError.couldNotInitializeContext }
+            guard let context else {
+                if enableLogging { print("Could not load context!") }
+                throw LlamaError.couldNotInitializeContext
+            }
 
-            return LlamaContext(model: model, context: context)
+            return LlamaContext(model: model, context: context, enableLogging: enableLogging)
         }
 
         func model_info() -> String {
             let result = UnsafeMutablePointer<Int8>.allocate(capacity: 256)
             result.initialize(repeating: Int8(0), count: 256)
             defer { result.deallocate() }
-
-            // TODO: there is probably another way to get the string from C
 
             let nChars = llama_model_desc(model, result, 256)
             let bufferPointer = UnsafeBufferPointer(start: result, count: Int(nChars))
@@ -1795,9 +1931,9 @@ public class Lightpack: LightpackProtocol, ObservableObject {
         }
 
         func get_n_tokens() -> Int32 { return batch.n_tokens }
-        
-        func completion_init(text: String) {
-            log("attempting to complete \"\(text)\"")
+
+        func completion_init(model: LPModel, text: String) {
+            specialTokens = model.specialTokens
 
             tokens_list = tokenize(text: text, add_bos: true)
             temporary_invalid_cchars = []
@@ -1824,28 +1960,17 @@ public class Lightpack: LightpackProtocol, ObservableObject {
             n_cur = batch.n_tokens
         }
 
-        func completion_loop() -> String {
+        func completion_loop() -> (String, Bool) {
             var new_token_id: llama_token = 0
 
-            let n_vocab = llama_n_vocab(model)
-            let logits = llama_get_logits_ith(context, batch.n_tokens - 1)
-
-            var candidates = Array<llama_token_data>()
-            candidates.reserveCapacity(Int(n_vocab))
-
-            for token_id in 0..<n_vocab {
-                candidates.append(llama_token_data(id: token_id, logit: logits![Int(token_id)], p: 0.0))
-            }
-            candidates.withUnsafeMutableBufferPointer() { buffer in
-                var candidates_p = llama_token_data_array(data: buffer.baseAddress, size: buffer.count, sorted: false)
-                new_token_id = llama_sample_token_greedy(context, &candidates_p)
-            }
-
+            new_token_id = llama_sampler_sample(sampling, context, batch.n_tokens - 1)
+            
             if llama_token_is_eog(model, new_token_id) || n_cur == n_len {
+                print("\n")
                 is_done = true
                 let new_token_str = String(cString: temporary_invalid_cchars + [0])
                 temporary_invalid_cchars.removeAll()
-                return new_token_str
+                return (new_token_str, true)
             }
 
             let new_token_cchars = token_to_piece(token: new_token_id)
@@ -1855,14 +1980,12 @@ public class Lightpack: LightpackProtocol, ObservableObject {
                 temporary_invalid_cchars.removeAll()
                 new_token_str = string
             } else if (0 ..< temporary_invalid_cchars.count).contains(where: {$0 != 0 && String(validatingUTF8: Array(temporary_invalid_cchars.suffix($0)) + [0]) != nil}) {
-                // in this case, at least the suffix of the temporary_invalid_cchars can be interpreted as UTF8 string
                 let string = String(cString: temporary_invalid_cchars + [0])
                 temporary_invalid_cchars.removeAll()
                 new_token_str = string
             } else {
                 new_token_str = ""
             }
-            // tokens_list.append(new_token_id)
 
             llama_batch_clear(&batch)
             llama_batch_add(&batch, new_token_id, n_cur, [0], true)
@@ -1870,9 +1993,11 @@ public class Lightpack: LightpackProtocol, ObservableObject {
             n_decode += 1
             n_cur    += 1
 
-            if llama_decode(context, batch) != 0 { log("failed to evaluate llama!") }
+            if llama_decode(context, batch) != 0 {
+                print("failed to evaluate llama!")
+            }
 
-            return new_token_str
+            return (new_token_str, false)
         }
 
         func bench(pp: Int, tg: Int, pl: Int, nr: Int = 1) -> String {
@@ -1951,7 +2076,7 @@ public class Lightpack: LightpackProtocol, ObservableObject {
             let model_desc     = model_info();
             let model_size     = String(format: "%.2f GiB", Double(llama_model_size(model)) / 1024.0 / 1024.0 / 1024.0);
             let model_n_params = String(format: "%.2f B", Double(llama_model_n_params(model)) / 1e9);
-            let backend        = "Metal";
+            let backend        = getBackendInfo();
             let pp_avg_str     = String(format: "%.2f", pp_avg);
             let tg_avg_str     = String(format: "%.2f", tg_avg);
             let pp_std_str     = String(format: "%.2f", pp_std);
