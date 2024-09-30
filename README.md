@@ -7,7 +7,7 @@
   <img src="https://img.shields.io/badge/Swift-5.5+-orange.svg" alt="Swift"/>
   <img src="https://img.shields.io/badge/Platforms-iOS%2014+%20|%20macOS%2012+%20|%20tvOS%2014+%20|%20watchOS%206+-blue.svg" alt="Platforms"/>
   <img src="https://img.shields.io/badge/Swift_Package_Manager-compatible-brightgreen.svg" alt="Swift Package Manager"/>
-  <img src="https://img.shields.io/badge/Package%20Size-113%20KB-brightgreen" alt="Package Size"/>
+  <img src="https://img.shields.io/badge/Package%20Size-145%20KB-brightgreen" alt="Package Size"/>
   <img src="https://img.shields.io/github/stars/lightpack-run/lightpack" alt="GitHub stars"/>
 </p>
 
