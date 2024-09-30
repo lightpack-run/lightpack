@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/github/stars/lightpack-run/lightpack" alt="GitHub stars"/>
 </p>
 
-**Run Llama 3.2 and Gemma 2 locally** in your iOS and macOS apps in 3 lines of code. Open-source, offline, and private.
+**Run Llama 3.2 and Gemma 2 locally** in your iOS and macOS apps in 3 lines of code. Open-source, offline, and private. Try it on [TestFlight]([url](https://testflight.apple.com/join/Hr7xjkWX))
 
 ## Installation
 
